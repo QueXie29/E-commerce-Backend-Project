@@ -85,3 +85,74 @@ class ProductApiTests(APITestCase):
 
         self.assertEqual(second_response.status_code, 200)
         self.assertEqual(second_response.data["data"]["name"], "MacBook Pro 14")
+
+    def test_public_category_route_rejects_post_without_creating_category(self):
+        payload = {
+            "name": "Forbidden Public Category",
+            "slug": "forbidden-public-category",
+            "is_active": True,
+        }
+        category_count = Category.objects.count()
+        self.client.force_authenticate(self.user)
+        self.client.raise_request_exception = False
+
+        response = self.client.post(reverse("category-list"), payload, format="json")
+
+        self.assertEqual(response.status_code, 405)
+        self.assertEqual(Category.objects.count(), category_count)
+        self.assertFalse(Category.objects.filter(slug=payload["slug"]).exists())
+
+    def test_public_product_route_rejects_post_without_creating_product(self):
+        payload = {
+            "category": self.category.id,
+            "name": "Forbidden Public Product",
+            "slug": "forbidden-public-product",
+            "description": "Public routes are read-only",
+            "price": "100.00",
+            "stock": 1,
+            "status": Product.Status.ACTIVE,
+            "image_url": "",
+        }
+        product_count = Product.objects.count()
+        self.client.force_authenticate(self.user)
+        self.client.raise_request_exception = False
+
+        response = self.client.post(reverse("product-list"), payload, format="json")
+
+        self.assertEqual(response.status_code, 405)
+        self.assertEqual(Product.objects.count(), product_count)
+        self.assertFalse(Product.objects.filter(slug=payload["slug"]).exists())
+
+    def test_normal_user_cannot_create_category_through_admin_route(self):
+        payload = {
+            "name": "Admin Only Category",
+            "slug": "admin-only-category",
+            "is_active": True,
+        }
+        category_count = Category.objects.count()
+        self.client.force_authenticate(self.user)
+
+        response = self.client.post(
+            reverse("admin-category-list"), payload, format="json"
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.data["code"], 40300)
+        self.assertEqual(Category.objects.count(), category_count)
+        self.assertFalse(Category.objects.filter(slug=payload["slug"]).exists())
+
+    def test_admin_can_create_category_through_admin_route(self):
+        payload = {
+            "name": "Admin Created Category",
+            "slug": "admin-created-category",
+            "is_active": True,
+        }
+        self.client.force_authenticate(self.admin)
+
+        response = self.client.post(
+            reverse("admin-category-list"), payload, format="json"
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["code"], 0)
+        self.assertTrue(Category.objects.filter(slug=payload["slug"]).exists())

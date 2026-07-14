@@ -21,7 +21,7 @@ from apps.products.services import (
 )
 
 
-class ApiViewSetResponseMixin:
+class ApiReadOnlyViewSetResponseMixin:
     def list(self, request, *args, **kwargs):
         queryset = self.filter_queryset(self.get_queryset())
         page = self.paginate_queryset(queryset)
@@ -37,6 +37,8 @@ class ApiViewSetResponseMixin:
         serializer = self.get_serializer(instance)
         return api_response(data=serializer.data)
 
+
+class ApiModelViewSetResponseMixin(ApiReadOnlyViewSetResponseMixin):
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -57,7 +59,7 @@ class ApiViewSetResponseMixin:
         return api_response(data=None)
 
 
-class CategoryViewSet(ApiViewSetResponseMixin, viewsets.ReadOnlyModelViewSet):
+class CategoryViewSet(ApiReadOnlyViewSetResponseMixin, viewsets.ReadOnlyModelViewSet):
     serializer_class = CategorySerializer
     permission_classes = (AllowAny,)
 
@@ -65,7 +67,7 @@ class CategoryViewSet(ApiViewSetResponseMixin, viewsets.ReadOnlyModelViewSet):
         return Category.objects.filter(is_active=True).order_by("name")
 
 
-class AdminCategoryViewSet(ApiViewSetResponseMixin, viewsets.ModelViewSet):
+class AdminCategoryViewSet(ApiModelViewSetResponseMixin, viewsets.ModelViewSet):
     queryset = Category.objects.all().order_by("name")
     serializer_class = CategorySerializer
     permission_classes = (IsAdminRole,)
@@ -75,7 +77,7 @@ class AdminCategoryViewSet(ApiViewSetResponseMixin, viewsets.ModelViewSet):
         instance.save(update_fields=["is_active", "updated_at"])
 
 
-class ProductViewSet(ApiViewSetResponseMixin, viewsets.ReadOnlyModelViewSet):
+class ProductViewSet(ApiReadOnlyViewSetResponseMixin, viewsets.ReadOnlyModelViewSet):
     permission_classes = (AllowAny,)
 
     def get_serializer_class(self):
@@ -154,7 +156,7 @@ class ProductViewSet(ApiViewSetResponseMixin, viewsets.ReadOnlyModelViewSet):
         return api_response(data=data)
 
 
-class AdminProductViewSet(ApiViewSetResponseMixin, viewsets.ModelViewSet):
+class AdminProductViewSet(ApiModelViewSetResponseMixin, viewsets.ModelViewSet):
     queryset = Product.objects.select_related("category").all()
     permission_classes = (IsAdminRole,)
 
