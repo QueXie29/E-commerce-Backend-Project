@@ -1,15 +1,131 @@
 from decimal import Decimal
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
+from django.http import QueryDict
+from django.test import SimpleTestCase
 from django.urls import reverse
 from rest_framework.test import APITestCase
 
 from apps.products.models import Category, Product
-from apps.products.services import make_product_detail_cache_key
+from apps.products.services import (
+    get_product_list_cache,
+    get_product_list_cache_version,
+    invalidate_product_list_cache,
+    make_product_detail_cache_key,
+    make_product_list_cache_key,
+    set_product_list_cache,
+)
 
 
 User = get_user_model()
+
+
+class ProductListCacheServiceTests(SimpleTestCase):
+    origin = "http://testserver"
+
+    def setUp(self):
+        cache.clear()
+
+    def test_list_cache_key_is_independent_of_query_parameter_order(self):
+        first = QueryDict("category=1&ordering=-price&page=2")
+        second = QueryDict("page=2&ordering=-price&category=1")
+
+        self.assertEqual(
+            make_product_list_cache_key(first, self.origin),
+            make_product_list_cache_key(second, self.origin),
+        )
+
+    def test_list_cache_key_changes_for_each_effective_parameter(self):
+        base = QueryDict(
+            "category=1&keyword=phone&min_price=10&max_price=20"
+            "&ordering=price&page=1&page_size=10"
+        )
+        base_key = make_product_list_cache_key(base, self.origin)
+        changed_values = {
+            "category": "2",
+            "keyword": "camera",
+            "min_price": "11",
+            "max_price": "21",
+            "ordering": "-price",
+            "page": "2",
+            "page_size": "20",
+        }
+
+        for parameter, value in changed_values.items():
+            with self.subTest(parameter=parameter):
+                changed = base.copy()
+                changed[parameter] = value
+                self.assertNotEqual(
+                    base_key,
+                    make_product_list_cache_key(changed, self.origin),
+                )
+
+    def test_unknown_and_empty_parameters_do_not_fragment_cache(self):
+        baseline = QueryDict("category=1")
+        noisy = QueryDict("category=1&foo=ignored&keyword=")
+
+        self.assertEqual(
+            make_product_list_cache_key(baseline, self.origin),
+            make_product_list_cache_key(noisy, self.origin),
+        )
+
+    def test_version_and_origin_change_list_cache_key(self):
+        params = QueryDict("category=1&page=1")
+        first_version = get_product_list_cache_version()
+        first_key = make_product_list_cache_key(params, self.origin)
+
+        new_version = invalidate_product_list_cache()
+        second_key = make_product_list_cache_key(params, self.origin)
+        other_origin_key = make_product_list_cache_key(
+            params,
+            "https://shop.example.com",
+        )
+
+        self.assertEqual(new_version, first_version + 1)
+        self.assertNotEqual(first_key, second_key)
+        self.assertNotEqual(second_key, other_origin_key)
+
+    def test_list_cache_helpers_round_trip_payload(self):
+        cache_key = make_product_list_cache_key(QueryDict("page=1"), self.origin)
+        payload = {
+            "code": 0,
+            "message": "success",
+            "data": {"count": 1, "results": [{"id": 1}]},
+        }
+
+        set_product_list_cache(cache_key, payload)
+
+        self.assertEqual(get_product_list_cache(cache_key), payload)
+
+    def test_list_cache_helpers_fail_open(self):
+        params = QueryDict("page=1")
+        cache_key = make_product_list_cache_key(params, self.origin)
+
+        with patch(
+            "apps.products.services.cache.get",
+            side_effect=RuntimeError("cache read failed"),
+        ):
+            self.assertIsNone(get_product_list_cache(cache_key))
+
+        with patch(
+            "apps.products.services.cache.set",
+            side_effect=RuntimeError("cache write failed"),
+        ):
+            self.assertIsNone(set_product_list_cache(cache_key, {"code": 0}))
+
+        with patch(
+            "apps.products.services.cache.incr",
+            side_effect=RuntimeError("cache increment failed"),
+        ):
+            self.assertIsNone(invalidate_product_list_cache())
+
+        with patch(
+            "apps.products.services.cache.get",
+            side_effect=RuntimeError("version read failed"),
+        ):
+            self.assertIsNone(make_product_list_cache_key(params, self.origin))
 
 
 class ProductApiTests(APITestCase):

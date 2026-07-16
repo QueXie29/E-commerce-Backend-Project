@@ -9,21 +9,91 @@ logger = logging.getLogger(__name__)
 
 PRODUCT_DETAIL_CACHE_KEY = "product:detail:{product_id}"
 PRODUCT_DETAIL_CACHE_TTL = 300
-PRODUCT_LIST_KEYS_CACHE_KEY = "product:list:keys"
+PRODUCT_LIST_CACHE_KEY = "product:list:v{version}:{digest}"
+PRODUCT_LIST_CACHE_TTL = 300
+PRODUCT_LIST_CACHE_VERSION_KEY = "product:list:version"
+PRODUCT_LIST_CACHE_ALLOWED_PARAMS = (
+    "category",
+    "keyword",
+    "min_price",
+    "max_price",
+    "ordering",
+    "page",
+    "page_size",
+)
 
 
 def make_product_detail_cache_key(product_id: int) -> str:
     return PRODUCT_DETAIL_CACHE_KEY.format(product_id=product_id)
 
 
-def make_product_list_cache_key(query_params) -> str:
+def get_product_list_cache_version():
+    try:
+        version = cache.get(PRODUCT_LIST_CACHE_VERSION_KEY)
+        if version is None:
+            cache.add(PRODUCT_LIST_CACHE_VERSION_KEY, 1, timeout=None)
+            version = cache.get(PRODUCT_LIST_CACHE_VERSION_KEY)
+        return int(version if version is not None else 1)
+    except Exception as exc:
+        logger.warning("Failed to read product list cache version: %s", exc)
+        return None
+
+
+def normalize_product_list_query_params(query_params):
+    normalized = []
+    for name in PRODUCT_LIST_CACHE_ALLOWED_PARAMS:
+        value = query_params.get(name)
+        if value in (None, ""):
+            continue
+        normalized.append((name, str(value)))
+    return normalized
+
+
+def make_product_list_cache_key(query_params, origin: str):
+    version = get_product_list_cache_version()
+    if version is None:
+        return None
+
     normalized = json.dumps(
-        sorted(query_params.items()),
+        {
+            "origin": origin,
+            "params": normalize_product_list_query_params(query_params),
+        },
         ensure_ascii=False,
         separators=(",", ":"),
+        sort_keys=True,
     )
     digest = hashlib.md5(normalized.encode("utf-8")).hexdigest()
-    return f"product:list:{digest}"
+    return PRODUCT_LIST_CACHE_KEY.format(version=version, digest=digest)
+
+
+def get_product_list_cache(cache_key):
+    if cache_key is None:
+        return None
+    try:
+        return cache.get(cache_key)
+    except Exception as exc:
+        logger.warning("Failed to read product list cache: %s", exc)
+        return None
+
+
+def set_product_list_cache(cache_key, data) -> None:
+    if cache_key is None:
+        return None
+    try:
+        cache.set(cache_key, data, timeout=PRODUCT_LIST_CACHE_TTL)
+    except Exception as exc:
+        logger.warning("Failed to write product list cache: %s", exc)
+    return None
+
+
+def invalidate_product_list_cache():
+    try:
+        cache.add(PRODUCT_LIST_CACHE_VERSION_KEY, 1, timeout=None)
+        return cache.incr(PRODUCT_LIST_CACHE_VERSION_KEY)
+    except Exception as exc:
+        logger.warning("Failed to invalidate product list cache: %s", exc)
+        return None
 
 
 def get_product_detail_cache(product_id: int):
