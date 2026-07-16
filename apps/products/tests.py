@@ -272,3 +272,146 @@ class ProductApiTests(APITestCase):
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.data["code"], 0)
         self.assertTrue(Category.objects.filter(slug=payload["slug"]).exists())
+
+    def test_product_list_uses_cached_paginated_response(self):
+        url = reverse("product-list")
+        first_response = self.client.get(url)
+        self.assertEqual(first_response.status_code, 200)
+
+        Product.objects.filter(id=self.active_product.id).update(
+            name="Database Only Name"
+        )
+        second_response = self.client.get(url)
+
+        self.assertEqual(second_response.status_code, 200)
+        self.assertEqual(second_response.data, first_response.data)
+        names = [item["name"] for item in second_response.data["data"]["results"]]
+        self.assertIn("MacBook Pro 14", names)
+        self.assertNotIn("Database Only Name", names)
+
+    def test_list_cache_isolated_by_ordering_and_page(self):
+        Product.objects.create(
+            category=self.category,
+            name="Budget Laptop",
+            slug="budget-laptop",
+            description="Budget",
+            price=Decimal("99.00"),
+            stock=3,
+            status=Product.Status.ACTIVE,
+        )
+        url = reverse("product-list")
+
+        page_one = self.client.get(
+            url,
+            {"ordering": "price", "page_size": 1, "page": 1},
+        )
+        page_two = self.client.get(
+            url,
+            {"ordering": "price", "page_size": 1, "page": 2},
+        )
+        descending = self.client.get(
+            url,
+            {"ordering": "-price", "page_size": 1, "page": 1},
+        )
+
+        self.assertEqual(page_one.data["data"]["results"][0]["name"], "Budget Laptop")
+        self.assertEqual(page_two.data["data"]["results"][0]["name"], "MacBook Pro 14")
+        self.assertEqual(descending.data["data"]["results"][0]["name"], "MacBook Pro 14")
+
+    def test_normal_user_shares_anonymous_public_list_cache(self):
+        url = reverse("product-list")
+        first_response = self.client.get(url)
+        Product.objects.filter(id=self.active_product.id).update(
+            name="Database Only Name"
+        )
+
+        self.client.force_authenticate(self.user)
+        second_response = self.client.get(url)
+
+        self.assertEqual(second_response.data, first_response.data)
+
+    def test_inflight_response_writes_only_to_original_cache_version(self):
+        params = QueryDict("")
+        origin = "http://testserver"
+        original_key = make_product_list_cache_key(params, origin)
+
+        def invalidate_during_read(cache_key):
+            self.assertEqual(cache_key, original_key)
+            invalidate_product_list_cache()
+            return None
+
+        with patch(
+            "apps.products.views.get_product_list_cache",
+            side_effect=invalidate_during_read,
+        ), patch("apps.products.views.set_product_list_cache") as cache_set:
+            response = self.client.get(reverse("product-list"))
+
+        self.assertEqual(response.status_code, 200)
+        cache_set.assert_called_once()
+        self.assertEqual(cache_set.call_args.args[0], original_key)
+        self.assertNotEqual(
+            original_key,
+            make_product_list_cache_key(params, origin),
+        )
+
+    def test_admin_bypasses_public_list_cache(self):
+        url = reverse("product-list")
+        public_response = self.client.get(url)
+        public_names = [
+            item["name"] for item in public_response.data["data"]["results"]
+        ]
+        self.assertNotIn("Old Laptop", public_names)
+
+        self.client.force_authenticate(self.admin)
+        admin_response = self.client.get(url)
+        admin_names = [
+            item["name"] for item in admin_response.data["data"]["results"]
+        ]
+
+        self.assertIn("Old Laptop", admin_names)
+
+    def test_admin_product_list_does_not_use_public_cache(self):
+        self.client.get(reverse("product-list"))
+        Product.objects.filter(id=self.active_product.id).update(
+            name="Database Only Name"
+        )
+
+        self.client.force_authenticate(self.admin)
+        response = self.client.get(reverse("admin-product-list"))
+        names = [item["name"] for item in response.data["data"]["results"]]
+
+        self.assertIn("Database Only Name", names)
+
+    def test_invalid_product_filter_response_is_not_cached(self):
+        with patch("apps.products.views.set_product_list_cache") as cache_set:
+            response = self.client.get(
+                reverse("product-list"),
+                {"category": "not-an-integer"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        cache_set.assert_not_called()
+
+    def test_list_cache_backend_failures_fall_back_to_database(self):
+        with patch(
+            "apps.products.services.cache.get",
+            side_effect=RuntimeError("cache read failed"),
+        ):
+            read_failure_response = self.client.get(reverse("product-list"))
+
+        cache.clear()
+        with patch(
+            "apps.products.services.cache.set",
+            side_effect=RuntimeError("cache write failed"),
+        ):
+            write_failure_response = self.client.get(reverse("product-list"))
+
+        self.assertEqual(read_failure_response.status_code, 200)
+        self.assertEqual(write_failure_response.status_code, 200)
+        self.assertIn(
+            "MacBook Pro 14",
+            [
+                item["name"]
+                for item in write_failure_response.data["data"]["results"]
+            ],
+        )

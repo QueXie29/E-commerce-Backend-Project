@@ -4,6 +4,7 @@ from django.db.models import Q
 from rest_framework import status, viewsets
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import AllowAny
+from rest_framework.response import Response
 
 from apps.common.permissions import IsAdminRole, is_admin_user
 from apps.common.responses import api_response
@@ -17,7 +18,10 @@ from apps.products.serializers import (
 from apps.products.services import (
     delete_product_detail_cache,
     get_product_detail_cache,
+    get_product_list_cache,
+    make_product_list_cache_key,
     set_product_detail_cache,
+    set_product_list_cache,
 )
 
 
@@ -79,6 +83,21 @@ class AdminCategoryViewSet(ApiModelViewSetResponseMixin, viewsets.ModelViewSet):
 
 class ProductViewSet(ApiReadOnlyViewSetResponseMixin, viewsets.ReadOnlyModelViewSet):
     permission_classes = (AllowAny,)
+
+    def list(self, request, *args, **kwargs):
+        if is_admin_user(request.user):
+            return super().list(request, *args, **kwargs)
+
+        origin = f"{request.scheme}://{request.get_host()}"
+        cache_key = make_product_list_cache_key(request.query_params, origin)
+        cached_data = get_product_list_cache(cache_key)
+        if cached_data is not None:
+            return Response(cached_data)
+
+        response = super().list(request, *args, **kwargs)
+        if response.status_code == status.HTTP_200_OK:
+            set_product_list_cache(cache_key, response.data)
+        return response
 
     def get_serializer_class(self):
         if self.action == "retrieve":
