@@ -216,3 +216,9 @@ python manage.py test
 - 订单事务回滚不切换版本，事务成功只切换一次。
 - 缓存不可用时商品和订单业务继续工作。
 - 新增测试通过，完整测试套件通过。
+
+## 最终审查修订（2026-07-16）
+
+- 分页响应的 `next`、`previous` 在缓存命中和未命中两条返回路径上都使用与缓存键相同的允许参数及最终值规则规范化：未知参数与空值被移除，重复的有效参数只保留最后一个值。这样也能清理滚动部署期间旧实例写入当前版本键的历史污染 payload；新响应在写入共享缓存前同样完成规范化。
+- 已注册的 Django Admin `ProductAdmin`、`CategoryAdmin` 通过共用 mixin 覆盖 `save_model()`、`delete_model()`、`delete_queryset()`；数据库操作成功后每次 Admin 操作只注册一次 `transaction.on_commit(invalidate_product_list_cache)`。不使用模型信号，避免订单逐项更新触发重复失效。
+- 服务层测试直接断言商品列表缓存写入固定使用 `timeout=300`。

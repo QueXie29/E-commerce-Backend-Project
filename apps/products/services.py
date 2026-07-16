@@ -1,6 +1,7 @@
 import hashlib
 import json
 import logging
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from django.core.cache import cache
 
@@ -47,6 +48,32 @@ def normalize_product_list_query_params(query_params):
             continue
         normalized.append((name, str(value)))
     return normalized
+
+
+def canonicalize_product_list_pagination_link(link):
+    if link is None:
+        return None
+
+    parsed = urlsplit(link)
+    query_params = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    canonical_query = urlencode(normalize_product_list_query_params(query_params))
+    return urlunsplit(parsed._replace(query=canonical_query))
+
+
+def canonicalize_product_list_pagination_links(payload):
+    if not isinstance(payload, dict):
+        return payload
+
+    pagination_data = payload.get("data")
+    if not isinstance(pagination_data, dict):
+        return payload
+
+    for relation in ("next", "previous"):
+        if relation in pagination_data:
+            pagination_data[relation] = canonicalize_product_list_pagination_link(
+                pagination_data[relation]
+            )
+    return payload
 
 
 def make_product_list_cache_key(query_params, origin: str):

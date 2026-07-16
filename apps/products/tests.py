@@ -1,10 +1,12 @@
 from decimal import Decimal
 from unittest.mock import patch
+from urllib.parse import parse_qsl, urlsplit
 
+from django.contrib import admin
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.http import QueryDict
-from django.test import SimpleTestCase
+from django.test import RequestFactory, SimpleTestCase, TestCase
 from django.urls import reverse
 from rest_framework.test import APITestCase
 
@@ -99,6 +101,15 @@ class ProductListCacheServiceTests(SimpleTestCase):
 
         self.assertEqual(get_product_list_cache(cache_key), payload)
 
+    def test_list_cache_write_uses_fixed_300_second_timeout(self):
+        cache_key = "product:list:v1:test"
+        payload = {"code": 0, "data": {"results": []}}
+
+        with patch("apps.products.services.cache.set") as cache_set:
+            set_product_list_cache(cache_key, payload)
+
+        cache_set.assert_called_once_with(cache_key, payload, timeout=300)
+
     def test_list_cache_helpers_fail_open(self):
         params = QueryDict("page=1")
         cache_key = make_product_list_cache_key(params, self.origin)
@@ -126,6 +137,135 @@ class ProductListCacheServiceTests(SimpleTestCase):
             side_effect=RuntimeError("version read failed"),
         ):
             self.assertIsNone(make_product_list_cache_key(params, self.origin))
+
+
+class ProductAdminInvalidationTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.request = RequestFactory().post("/admin/products/")
+        self.request.user = User.objects.create_superuser(
+            username="django-admin",
+            password="Test123456",
+            email="admin@example.com",
+        )
+        self.base_category = Category.objects.create(
+            name="Base Category",
+            slug="base-category",
+        )
+
+    def assert_schedules_one_invalidation_after_commit(self, operation):
+        version_before = get_product_list_cache_version()
+
+        with self.captureOnCommitCallbacks(execute=False) as callbacks:
+            operation()
+
+        self.assertEqual(get_product_list_cache_version(), version_before)
+        self.assertEqual(len(callbacks), 1)
+
+        callbacks[0]()
+
+        self.assertEqual(get_product_list_cache_version(), version_before + 1)
+
+    def test_registered_admin_save_schedules_exactly_one_invalidation(self):
+        objects = (
+            Category(name="Saved Category", slug="saved-category"),
+            Product(
+                category=self.base_category,
+                name="Saved Product",
+                slug="saved-product",
+                description="Saved through Django Admin",
+                price=Decimal("100.00"),
+                stock=1,
+                status=Product.Status.ACTIVE,
+            ),
+        )
+
+        for obj in objects:
+            with self.subTest(model=obj.__class__.__name__):
+                model_admin = admin.site._registry[obj.__class__]
+                self.assert_schedules_one_invalidation_after_commit(
+                    lambda: model_admin.save_model(
+                        self.request,
+                        obj,
+                        form=None,
+                        change=False,
+                    )
+                )
+                self.assertTrue(obj.__class__.objects.filter(pk=obj.pk).exists())
+
+    def test_registered_admin_single_delete_schedules_exactly_one_invalidation(self):
+        objects = (
+            Category.objects.create(
+                name="Deleted Category",
+                slug="deleted-category",
+            ),
+            Product.objects.create(
+                category=self.base_category,
+                name="Deleted Product",
+                slug="deleted-product",
+                description="Deleted through Django Admin",
+                price=Decimal("100.00"),
+                stock=1,
+                status=Product.Status.ACTIVE,
+            ),
+        )
+
+        for obj in objects:
+            with self.subTest(model=obj.__class__.__name__):
+                model = obj.__class__
+                object_id = obj.pk
+                model_admin = admin.site._registry[model]
+                self.assert_schedules_one_invalidation_after_commit(
+                    lambda: model_admin.delete_model(self.request, obj)
+                )
+                self.assertFalse(model.objects.filter(pk=object_id).exists())
+
+    def test_registered_admin_bulk_delete_schedules_one_invalidation_for_all_rows(self):
+        category_ids = list(
+            Category.objects.bulk_create(
+                [
+                    Category(name="Bulk Category One", slug="bulk-category-one"),
+                    Category(name="Bulk Category Two", slug="bulk-category-two"),
+                ]
+            )
+        )
+        product_ids = list(
+            Product.objects.bulk_create(
+                [
+                    Product(
+                        category=self.base_category,
+                        name="Bulk Product One",
+                        slug="bulk-product-one",
+                        description="Bulk deleted through Django Admin",
+                        price=Decimal("100.00"),
+                        stock=1,
+                        status=Product.Status.ACTIVE,
+                    ),
+                    Product(
+                        category=self.base_category,
+                        name="Bulk Product Two",
+                        slug="bulk-product-two",
+                        description="Bulk deleted through Django Admin",
+                        price=Decimal("200.00"),
+                        stock=2,
+                        status=Product.Status.ACTIVE,
+                    ),
+                ]
+            )
+        )
+
+        for model, objects in (
+            (Category, category_ids),
+            (Product, product_ids),
+        ):
+            with self.subTest(model=model.__name__):
+                object_ids = [obj.pk for obj in objects]
+                queryset = model.objects.filter(pk__in=object_ids)
+                model_admin = admin.site._registry[model]
+                self.assert_schedules_one_invalidation_after_commit(
+                    lambda: model_admin.delete_queryset(self.request, queryset)
+                )
+                self.assertFalse(model.objects.filter(pk__in=object_ids).exists())
 
 
 class ProductApiTests(APITestCase):
@@ -317,6 +457,113 @@ class ProductApiTests(APITestCase):
         self.assertEqual(page_one.data["data"]["results"][0]["name"], "Budget Laptop")
         self.assertEqual(page_two.data["data"]["results"][0]["name"], "MacBook Pro 14")
         self.assertEqual(descending.data["data"]["results"][0]["name"], "MacBook Pro 14")
+
+    def test_cached_pagination_links_ignore_unknown_empty_and_duplicate_parameters(self):
+        Product.objects.create(
+            category=self.category,
+            name="Budget Laptop",
+            slug="budget-laptop-pagination",
+            description="Budget",
+            price=Decimal("99.00"),
+            stock=3,
+            status=Product.Status.ACTIVE,
+        )
+        Product.objects.create(
+            category=self.category,
+            name="Midrange Laptop",
+            slug="midrange-laptop-pagination",
+            description="Midrange",
+            price=Decimal("999.00"),
+            stock=2,
+            status=Product.Status.ACTIVE,
+        )
+        url = reverse("product-list")
+
+        noisy_page_one = self.client.get(
+            f"{url}?foo=one&keyword=&ordering=price&ordering=-price&page_size=1"
+        )
+        clean_page_one = self.client.get(
+            f"{url}?foo=two&ordering=-price&page_size=1"
+        )
+
+        self.assertEqual(noisy_page_one.status_code, 200)
+        self.assertEqual(clean_page_one.status_code, 200)
+        noisy_next = noisy_page_one.data["data"]["next"]
+        clean_next = clean_page_one.data["data"]["next"]
+        self.assertEqual(noisy_next, clean_next)
+        self.assertEqual(
+            parse_qsl(urlsplit(noisy_next).query, keep_blank_values=True),
+            [("ordering", "-price"), ("page", "2"), ("page_size", "1")],
+        )
+
+        noisy_page_two = self.client.get(
+            f"{url}?foo=one&keyword=&ordering=price&ordering=-price"
+            "&page=2&page_size=1"
+        )
+        clean_page_two = self.client.get(
+            f"{url}?foo=two&ordering=-price&page=2&page_size=1"
+        )
+
+        self.assertEqual(noisy_page_two.status_code, 200)
+        self.assertEqual(clean_page_two.status_code, 200)
+        noisy_previous = noisy_page_two.data["data"]["previous"]
+        clean_previous = clean_page_two.data["data"]["previous"]
+        self.assertEqual(noisy_previous, clean_previous)
+        self.assertEqual(
+            parse_qsl(urlsplit(noisy_previous).query, keep_blank_values=True),
+            [("ordering", "-price"), ("page_size", "1")],
+        )
+        self.assertEqual(
+            parse_qsl(
+                urlsplit(noisy_page_two.data["data"]["next"]).query,
+                keep_blank_values=True,
+            ),
+            [("ordering", "-price"), ("page", "3"), ("page_size", "1")],
+        )
+
+    def test_cache_hit_canonicalizes_legacy_polluted_pagination_links(self):
+        cache_key = make_product_list_cache_key(
+            QueryDict("ordering=-price&page=2&page_size=1"),
+            "http://testserver",
+        )
+        polluted_payload = {
+            "code": 0,
+            "message": "success",
+            "data": {
+                "count": 3,
+                "next": (
+                    "http://testserver/api/products/?foo=old&keyword="
+                    "&ordering=price&ordering=-price&page=3&page_size=1"
+                ),
+                "previous": (
+                    "http://testserver/api/products/?foo=old&keyword="
+                    "&ordering=price&ordering=-price&page_size=1"
+                ),
+                "results": [],
+            },
+        }
+        set_product_list_cache(cache_key, polluted_payload)
+
+        response = self.client.get(
+            reverse("product-list")
+            + "?foo=current&ordering=-price&page=2&page_size=1"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            parse_qsl(
+                urlsplit(response.data["data"]["next"]).query,
+                keep_blank_values=True,
+            ),
+            [("ordering", "-price"), ("page", "3"), ("page_size", "1")],
+        )
+        self.assertEqual(
+            parse_qsl(
+                urlsplit(response.data["data"]["previous"]).query,
+                keep_blank_values=True,
+            ),
+            [("ordering", "-price"), ("page_size", "1")],
+        )
 
     def test_normal_user_shares_anonymous_public_list_cache(self):
         url = reverse("product-list")

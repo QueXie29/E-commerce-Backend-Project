@@ -16,6 +16,7 @@ from apps.products.serializers import (
     ProductListSerializer,
 )
 from apps.products.services import (
+    canonicalize_product_list_pagination_links,
     delete_product_detail_cache,
     get_product_detail_cache,
     get_product_list_cache,
@@ -102,10 +103,12 @@ class ProductViewSet(ApiReadOnlyViewSetResponseMixin, viewsets.ReadOnlyModelView
         cache_key = make_product_list_cache_key(request.query_params, origin)
         cached_data = get_product_list_cache(cache_key)
         if cached_data is not None:
+            canonicalize_product_list_pagination_links(cached_data)
             return Response(cached_data)
 
         response = super().list(request, *args, **kwargs)
         if response.status_code == status.HTTP_200_OK:
+            canonicalize_product_list_pagination_links(response.data)
             set_product_list_cache(cache_key, response.data)
         return response
 

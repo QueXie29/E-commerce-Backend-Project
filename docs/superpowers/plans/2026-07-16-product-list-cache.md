@@ -1054,3 +1054,12 @@ git log -5 --oneline
 ```
 
 Expected: no whitespace errors, no uncommitted implementation files, and the recent history contains the four focused implementation commits from Tasks 1-4.
+
+---
+
+### Final Review Amendment: Canonical links and Django Admin invalidation
+
+- [x] Add real multi-page API regressions proving unknown, empty, and duplicate query parameters cannot leak through cached `next`/`previous` links. Apply shared payload canonicalization on both cache hits and misses so legacy or rolling-deployment payloads are cleaned before return; canonical links reuse `PRODUCT_LIST_CACHE_ALLOWED_PARAMS` and last-value normalization.
+- [x] Add a shared `ModelAdmin` mixin for registered Product and Category save, single-delete, and bulk-delete paths. Each successful operation registers exactly one `transaction.on_commit(invalidate_product_list_cache)` callback; no model signals are introduced.
+- [x] Directly assert that product-list cache writes call `cache.set(..., timeout=300)`.
+- [x] Re-run the focused regression tests, product tests, order tests, Django checks, complete suite, and `git diff --check` before the final-review fix commit.
