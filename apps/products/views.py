@@ -154,6 +154,11 @@ class ProductViewSet(ApiReadOnlyViewSetResponseMixin, viewsets.ReadOnlyModelView
             set_product_detail_cache(instance.id, data)
 
         return api_response(data=data)
+    
+    ''' def retrieve(self, request, *args, **kwargs):
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        return api_response(data=serializer.data)'''
 
 
 class AdminProductViewSet(ApiModelViewSetResponseMixin, viewsets.ModelViewSet):

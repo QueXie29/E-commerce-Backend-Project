@@ -42,6 +42,7 @@ class ProductDetailSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Product
+        #多了"description","updated_at"
         fields = (
             "id",
             "category",

@@ -16,7 +16,20 @@ class Category(models.Model):
     def __str__(self) -> str:
         return self.name
 
-
+# fields = (
+#             "id",
+#             "category",
+#             "name",
+#             "slug",
+#             "description",
+#             "price",
+#             "stock",
+#             "sales_count",
+#             "status",
+#             "image_url",
+#             "created_at",
+#             "updated_at",
+#         )
 class Product(models.Model):
     class Status(models.TextChoices):
         ACTIVE = "active", "上架"
