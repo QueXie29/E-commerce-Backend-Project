@@ -86,9 +86,12 @@ product:list:v{version}:{digest}
 
 服务层增加：
 
-- `get_product_list_cache(query_params, origin)`：读取当前版本下的列表响应；缓存异常返回 `None`。
-- `set_product_list_cache(query_params, origin, data)`：写入最终响应数据，TTL 为 300 秒；缓存异常只记录日志。
+- `make_product_list_cache_key(query_params, origin)`：读取一次当前版本并生成列表缓存键；版本读取失败时返回 `None`。
+- `get_product_list_cache(cache_key)`：读取指定缓存键的列表响应；缓存异常返回 `None`。
+- `set_product_list_cache(cache_key, data)`：写入指定缓存键的最终响应数据，TTL 为 300 秒；缓存异常只记录日志。
 - `invalidate_product_list_cache()`：递增列表缓存版本。
+
+一次列表请求只生成一次缓存键，并复用于缓存读取和数据库查询后的缓存写入。如果查询数据库期间版本被其他写操作递增，该请求仍然只会把结果写回旧版本键，不会把失效前开始查询的结果污染到新版本。
 
 缓存值保存 `Response.data`，而不是 QuerySet、模型对象或 DRF Response 对象。
 
