@@ -12,7 +12,10 @@ from apps.common.exceptions import BusinessException
 from apps.common.permissions import is_admin_user
 from apps.orders.models import Order, OrderItem
 from apps.products.models import Product
-from apps.products.services import delete_product_detail_cache
+from apps.products.services import (
+    delete_product_detail_cache,
+    invalidate_product_list_cache,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -110,6 +113,7 @@ def create_order_from_cart(user, remark: str = "") -> Order:
             order.total_amount = total_amount
             order.save(update_fields=["total_amount", "updated_at"])
             CartItem.objects.filter(id__in=[item.id for item in cart_items]).delete()
+            transaction.on_commit(invalidate_product_list_cache)
 
             return get_order_for_response(order.id)
     finally:
@@ -171,5 +175,6 @@ def cancel_order(user, order_id: int) -> Order:
         order.status = Order.Status.CANCELLED
         order.cancelled_at = timezone.now()
         order.save(update_fields=["status", "cancelled_at", "updated_at"])
+        transaction.on_commit(invalidate_product_list_cache)
 
     return get_order_for_response(order.id)
