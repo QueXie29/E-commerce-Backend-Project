@@ -415,3 +415,115 @@ class ProductApiTests(APITestCase):
                 for item in write_failure_response.data["data"]["results"]
             ],
         )
+
+    def test_admin_product_create_update_destroy_increment_list_version(self):
+        self.client.force_authenticate(self.admin)
+        payload = {
+            "category": self.category.id,
+            "name": "Cache Managed Product",
+            "slug": "cache-managed-product",
+            "description": "Cache invalidation",
+            "price": "500.00",
+            "stock": 4,
+            "status": Product.Status.ACTIVE,
+            "image_url": "",
+        }
+
+        before_create = get_product_list_cache_version()
+        create_response = self.client.post(
+            reverse("admin-product-list"),
+            payload,
+            format="json",
+        )
+        created_id = create_response.data["data"]["id"]
+        self.assertEqual(create_response.status_code, 201)
+        self.assertEqual(get_product_list_cache_version(), before_create + 1)
+
+        before_update = get_product_list_cache_version()
+        update_response = self.client.patch(
+            reverse("admin-product-detail", args=[created_id]),
+            {"price": "600.00"},
+            format="json",
+        )
+        self.assertEqual(update_response.status_code, 200)
+        self.assertEqual(get_product_list_cache_version(), before_update + 1)
+
+        before_destroy = get_product_list_cache_version()
+        destroy_response = self.client.delete(
+            reverse("admin-product-detail", args=[created_id])
+        )
+        self.assertEqual(destroy_response.status_code, 200)
+        self.assertEqual(get_product_list_cache_version(), before_destroy + 1)
+
+    def test_admin_category_create_update_destroy_increment_list_version(self):
+        self.client.force_authenticate(self.admin)
+        payload = {
+            "name": "Cache Category",
+            "slug": "cache-category",
+            "is_active": True,
+        }
+
+        before_create = get_product_list_cache_version()
+        create_response = self.client.post(
+            reverse("admin-category-list"),
+            payload,
+            format="json",
+        )
+        created_id = create_response.data["data"]["id"]
+        self.assertEqual(create_response.status_code, 201)
+        self.assertEqual(get_product_list_cache_version(), before_create + 1)
+
+        before_update = get_product_list_cache_version()
+        update_response = self.client.patch(
+            reverse("admin-category-detail", args=[created_id]),
+            {"name": "Renamed Cache Category"},
+            format="json",
+        )
+        self.assertEqual(update_response.status_code, 200)
+        self.assertEqual(get_product_list_cache_version(), before_update + 1)
+
+        before_destroy = get_product_list_cache_version()
+        destroy_response = self.client.delete(
+            reverse("admin-category-detail", args=[created_id])
+        )
+        self.assertEqual(destroy_response.status_code, 200)
+        self.assertEqual(get_product_list_cache_version(), before_destroy + 1)
+
+    def test_admin_product_update_refreshes_cached_public_list(self):
+        first_response = self.client.get(reverse("product-list"))
+        self.assertIn(
+            "MacBook Pro 14",
+            [item["name"] for item in first_response.data["data"]["results"]],
+        )
+
+        self.client.force_authenticate(self.admin)
+        update_response = self.client.patch(
+            reverse("admin-product-detail", args=[self.active_product.id]),
+            {"name": "Updated MacBook"},
+            format="json",
+        )
+        self.assertEqual(update_response.status_code, 200)
+
+        self.client.force_authenticate(user=None)
+        second_response = self.client.get(reverse("product-list"))
+        names = [item["name"] for item in second_response.data["data"]["results"]]
+        self.assertIn("Updated MacBook", names)
+        self.assertNotIn("MacBook Pro 14", names)
+
+    def test_category_deactivation_refreshes_cached_public_list(self):
+        first_response = self.client.get(reverse("product-list"))
+        self.assertIn(
+            "MacBook Pro 14",
+            [item["name"] for item in first_response.data["data"]["results"]],
+        )
+
+        self.client.force_authenticate(self.admin)
+        destroy_response = self.client.delete(
+            reverse("admin-category-detail", args=[self.category.id])
+        )
+        self.assertEqual(destroy_response.status_code, 200)
+
+        self.client.force_authenticate(user=None)
+        second_response = self.client.get(reverse("product-list"))
+        names = [item["name"] for item in second_response.data["data"]["results"]]
+        self.assertNotIn("MacBook Pro 14", names)

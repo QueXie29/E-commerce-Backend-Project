@@ -19,6 +19,7 @@ from apps.products.services import (
     delete_product_detail_cache,
     get_product_detail_cache,
     get_product_list_cache,
+    invalidate_product_list_cache,
     make_product_list_cache_key,
     set_product_detail_cache,
     set_product_list_cache,
@@ -76,9 +77,18 @@ class AdminCategoryViewSet(ApiModelViewSetResponseMixin, viewsets.ModelViewSet):
     serializer_class = CategorySerializer
     permission_classes = (IsAdminRole,)
 
+    def perform_create(self, serializer):
+        serializer.save()
+        invalidate_product_list_cache()
+
+    def perform_update(self, serializer):
+        serializer.save()
+        invalidate_product_list_cache()
+
     def perform_destroy(self, instance):
         instance.is_active = False
         instance.save(update_fields=["is_active", "updated_at"])
+        invalidate_product_list_cache()
 
 
 class ProductViewSet(ApiReadOnlyViewSetResponseMixin, viewsets.ReadOnlyModelViewSet):
@@ -194,12 +204,15 @@ class AdminProductViewSet(ApiModelViewSetResponseMixin, viewsets.ModelViewSet):
     def perform_create(self, serializer):
         product = serializer.save()
         delete_product_detail_cache(product.id)
+        invalidate_product_list_cache()
 
     def perform_update(self, serializer):
         product = serializer.save()
         delete_product_detail_cache(product.id)
+        invalidate_product_list_cache()
 
     def perform_destroy(self, instance):
         instance.status = Product.Status.INACTIVE
         instance.save(update_fields=["status", "updated_at"])
         delete_product_detail_cache(instance.id)
+        invalidate_product_list_cache()
