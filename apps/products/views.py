@@ -1,5 +1,7 @@
 from decimal import Decimal, InvalidOperation
+from functools import partial
 
+from django.db import transaction
 from django.db.models import Q
 from rest_framework import status, viewsets
 from rest_framework.exceptions import ValidationError
@@ -17,6 +19,7 @@ from apps.products.serializers import (
 )
 from apps.products.services import (
     canonicalize_product_list_pagination_links,
+    delete_category_product_detail_caches,
     delete_product_detail_cache,
     get_product_detail_cache,
     get_product_list_cache,
@@ -83,13 +86,19 @@ class AdminCategoryViewSet(ApiModelViewSetResponseMixin, viewsets.ModelViewSet):
         invalidate_product_list_cache()
 
     def perform_update(self, serializer):
-        serializer.save()
+        category = serializer.save()
         invalidate_product_list_cache()
+        transaction.on_commit(
+            partial(delete_category_product_detail_caches, category.id)
+        )
 
     def perform_destroy(self, instance):
         instance.is_active = False
         instance.save(update_fields=["is_active", "updated_at"])
         invalidate_product_list_cache()
+        transaction.on_commit(
+            partial(delete_category_product_detail_caches, instance.id)
+        )
 
 
 class ProductViewSet(ApiReadOnlyViewSetResponseMixin, viewsets.ReadOnlyModelViewSet):
@@ -182,7 +191,10 @@ class ProductViewSet(ApiReadOnlyViewSetResponseMixin, viewsets.ReadOnlyModelView
         serializer = self.get_serializer(instance)
         data = serializer.data
 
-        if instance.status == Product.Status.ACTIVE:
+        if (
+            not is_admin_user(request.user)
+            and instance.status == Product.Status.ACTIVE
+        ):
             set_product_detail_cache(instance.id, data)
 
         return api_response(data=data)
