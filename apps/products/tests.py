@@ -336,6 +336,46 @@ class ProductAdminInvalidationTests(TestCase):
                 )
                 self.assertFalse(model.objects.filter(pk__in=object_ids).exists())
 
+    def test_category_admin_change_combines_list_and_detail_invalidation(self):
+        product = Product.objects.create(
+            category=self.base_category,
+            name="Cached Admin Product",
+            slug="cached-admin-product",
+            description="Cached before category admin update",
+            price=Decimal("100.00"),
+            stock=1,
+            status=Product.Status.ACTIVE,
+        )
+        detail_cache_key = make_product_detail_cache_key(product.id)
+        cache.set(
+            detail_cache_key,
+            {"id": product.id, "name": product.name},
+            timeout=300,
+        )
+        version_before = get_product_list_cache_version()
+        model_admin = admin.site._registry[Category]
+        self.base_category.name = "Renamed Through Django Admin"
+
+        with self.captureOnCommitCallbacks(execute=False) as callbacks:
+            model_admin.save_model(
+                self.request,
+                self.base_category,
+                form=None,
+                change=True,
+            )
+
+        self.assertEqual(len(callbacks), 1)
+        self.assertEqual(get_product_list_cache_version(), version_before)
+        self.assertIsNotNone(cache.get(detail_cache_key))
+
+        callbacks[0]()
+
+        self.assertEqual(
+            get_product_list_cache_version(),
+            version_before + 1,
+        )
+        self.assertIsNone(cache.get(detail_cache_key))
+
 
 class ProductApiTests(APITestCase):
     def setUp(self):
