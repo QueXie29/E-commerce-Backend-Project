@@ -12,8 +12,10 @@ from rest_framework.test import APITestCase
 
 from apps.products.models import Category, Product
 from apps.products.services import (
+    delete_category_product_detail_caches,
     get_product_list_cache,
     get_product_list_cache_version,
+    invalidate_category_caches,
     invalidate_product_list_cache,
     make_product_detail_cache_key,
     make_product_list_cache_key,
@@ -137,6 +139,72 @@ class ProductListCacheServiceTests(SimpleTestCase):
             side_effect=RuntimeError("version read failed"),
         ):
             self.assertIsNone(make_product_list_cache_key(params, self.origin))
+
+
+class ProductDetailCacheInvalidationServiceTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.target_category = Category.objects.create(
+            name="Target Category",
+            slug="target-category",
+        )
+        self.other_category = Category.objects.create(
+            name="Other Category",
+            slug="other-category",
+        )
+        self.target_products = [
+            Product.objects.create(
+                category=self.target_category,
+                name=f"Target Product {number}",
+                slug=f"target-product-{number}",
+                description="Target product",
+                price=Decimal("100.00"),
+                stock=1,
+            )
+            for number in (1, 2)
+        ]
+        self.other_product = Product.objects.create(
+            category=self.other_category,
+            name="Other Product",
+            slug="other-product",
+            description="Other product",
+            price=Decimal("200.00"),
+            stock=1,
+        )
+
+    def test_delete_category_product_detail_caches_only_deletes_target_keys(self):
+        target_keys = [
+            make_product_detail_cache_key(product.id)
+            for product in self.target_products
+        ]
+        other_key = make_product_detail_cache_key(self.other_product.id)
+        cache.set_many({key: {"cached": True} for key in target_keys + [other_key]})
+
+        delete_category_product_detail_caches(self.target_category.id)
+
+        self.assertEqual(cache.get_many(target_keys), {})
+        self.assertEqual(cache.get(other_key), {"cached": True})
+
+    def test_delete_category_product_detail_caches_fails_open(self):
+        with patch(
+            "apps.products.services.cache.delete_many",
+            side_effect=RuntimeError("cache delete failed"),
+        ):
+            self.assertIsNone(
+                delete_category_product_detail_caches(self.target_category.id)
+            )
+
+    @patch("apps.products.services.delete_category_product_detail_caches")
+    @patch("apps.products.services.invalidate_product_list_cache")
+    def test_invalidate_category_caches_invalidates_list_and_details(
+        self,
+        invalidate_list_cache,
+        delete_detail_caches,
+    ):
+        invalidate_category_caches(self.target_category.id)
+
+        invalidate_list_cache.assert_called_once_with()
+        delete_detail_caches.assert_called_once_with(self.target_category.id)
 
 
 class ProductAdminInvalidationTests(TestCase):

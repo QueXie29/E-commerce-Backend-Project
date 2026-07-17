@@ -5,6 +5,8 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from django.core.cache import cache
 
+from apps.products.models import Product
+
 
 logger = logging.getLogger(__name__)
 
@@ -147,3 +149,23 @@ def delete_product_detail_cache(product_id: int) -> None:
         cache.delete(make_product_detail_cache_key(product_id))
     except Exception as exc:
         logger.warning("Failed to delete product detail cache: %s", exc)
+
+
+def delete_category_product_detail_caches(category_id: int) -> None:
+    try:
+        product_ids = Product.objects.filter(category_id=category_id).values_list(
+            "id",
+            flat=True,
+        )
+        cache_keys = [
+            make_product_detail_cache_key(product_id) for product_id in product_ids
+        ]
+        if cache_keys:
+            cache.delete_many(cache_keys)
+    except Exception as exc:
+        logger.warning("Failed to delete category product detail caches: %s", exc)
+
+
+def invalidate_category_caches(category_id: int) -> None:
+    invalidate_product_list_cache()
+    delete_category_product_detail_caches(category_id)
