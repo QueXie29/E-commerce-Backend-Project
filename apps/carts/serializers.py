@@ -36,7 +36,7 @@ class CartItemSerializer(serializers.ModelSerializer):
 class AddCartItemSerializer(serializers.Serializer):
     product_id = serializers.IntegerField(min_value=1)
     quantity = serializers.IntegerField(min_value=1)
-
+ 
     def validate(self, attrs):
         try:
             product = Product.objects.select_related("category").get(id=attrs["product_id"])

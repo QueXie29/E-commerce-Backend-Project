@@ -34,9 +34,13 @@ class CartItem(models.Model):
             ),
         ]
 
+    '''@property 的作用，是让这个方法像普通属性一样使用：
+    cart_item.subtotal
+    而不需要写：
+    cart_item.subtotal()'''
     @property
     def subtotal(self):
         return self.product.price * self.quantity
-
+    
     def __str__(self) -> str:
         return f"{self.user_id}:{self.product_id} x {self.quantity}"

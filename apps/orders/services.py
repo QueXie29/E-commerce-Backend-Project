@@ -20,10 +20,11 @@ from apps.products.services import (
 
 logger = logging.getLogger(__name__)
 
+#防重复提交锁
 ORDER_CREATE_LOCK_KEY = "lock:order:create:user:{user_id}"
 ORDER_CREATE_LOCK_TTL = 10
 
-
+#EC + 时间戳 + 随机后缀   EC-20260718153045123456-A8F31C9D
 def generate_order_no() -> str:
     timestamp = timezone.now().strftime("%Y%m%d%H%M%S%f")
     suffix = uuid.uuid4().hex[:8].upper()
@@ -43,6 +44,7 @@ def create_order_from_cart(user, remark: str = "") -> Order:
 
     try:
         with transaction.atomic():
+            #list() 会立即执行 SQL，并把结果转换成普通 Python 列表
             cart_items = list(
                 CartItem.objects.select_related("product", "product__category")
                 .filter(user=user, selected=True)
