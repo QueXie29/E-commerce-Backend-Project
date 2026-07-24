@@ -12,6 +12,38 @@ logger = logging.getLogger(__name__)
 
 PRODUCT_DETAIL_CACHE_KEY = "product:detail:{product_id}"
 PRODUCT_DETAIL_CACHE_TTL = 300
+#详情缓存
+
+def make_product_detail_cache_key(product_id: int) -> str:
+    return PRODUCT_DETAIL_CACHE_KEY.format(product_id=product_id)
+
+def get_product_detail_cache(product_id: int):
+    try:
+        return cache.get(make_product_detail_cache_key(product_id))
+    except Exception as exc:
+        logger.warning("Failed to read product detail cache: %s", exc)
+        return None
+
+
+def set_product_detail_cache(product_id: int, data) -> None:
+    try:
+        cache.set(
+            make_product_detail_cache_key(product_id),
+            data,
+            timeout=PRODUCT_DETAIL_CACHE_TTL,
+        )
+    except Exception as exc:
+        logger.warning("Failed to write product detail cache: %s", exc)
+
+
+def delete_product_detail_cache(product_id: int) -> None:
+    try:
+        cache.delete(make_product_detail_cache_key(product_id))
+    except Exception as exc:
+        logger.warning("Failed to delete product detail cache: %s", exc)
+
+
+#列表缓存
 PRODUCT_LIST_CACHE_KEY = "product:list:v{version}:{digest}"
 PRODUCT_LIST_CACHE_TTL = 300
 PRODUCT_LIST_CACHE_VERSION_KEY = "product:list:version"
@@ -24,11 +56,6 @@ PRODUCT_LIST_CACHE_ALLOWED_PARAMS = (
     "page",
     "page_size",
 )
-
-
-def make_product_detail_cache_key(product_id: int) -> str:
-    return PRODUCT_DETAIL_CACHE_KEY.format(product_id=product_id)
-
 
 def get_product_list_cache_version():
     try:
@@ -88,9 +115,9 @@ def make_product_list_cache_key(query_params, origin: str):
             "origin": origin,
             "params": normalize_product_list_query_params(query_params),
         },
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
+        ensure_ascii=False,    #中文不强制转换成 \uXXXX。
+        separators=(",", ":"),  #去掉多余空格，保证字符串紧凑、稳定。
+        sort_keys=True,          #字典键顺序固定，避免顺序不同导致结果不同。
     )
     digest = hashlib.md5(normalized.encode("utf-8")).hexdigest()
     return PRODUCT_LIST_CACHE_KEY.format(version=version, digest=digest)
@@ -123,33 +150,6 @@ def invalidate_product_list_cache():
     except Exception as exc:
         logger.warning("Failed to invalidate product list cache: %s", exc)
         return None
-
-
-def get_product_detail_cache(product_id: int):
-    try:
-        return cache.get(make_product_detail_cache_key(product_id))
-    except Exception as exc:
-        logger.warning("Failed to read product detail cache: %s", exc)
-        return None
-
-
-def set_product_detail_cache(product_id: int, data) -> None:
-    try:
-        cache.set(
-            make_product_detail_cache_key(product_id),
-            data,
-            timeout=PRODUCT_DETAIL_CACHE_TTL,
-        )
-    except Exception as exc:
-        logger.warning("Failed to write product detail cache: %s", exc)
-
-
-def delete_product_detail_cache(product_id: int) -> None:
-    try:
-        cache.delete(make_product_detail_cache_key(product_id))
-    except Exception as exc:
-        logger.warning("Failed to delete product detail cache: %s", exc)
-
 
 def delete_category_product_detail_caches(category_id: int) -> None:
     try:
