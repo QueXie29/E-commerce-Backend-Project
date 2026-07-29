@@ -376,6 +376,96 @@ class ProductAdminInvalidationTests(TestCase):
         )
         self.assertIsNone(cache.get(detail_cache_key))
 
+    def test_product_admin_change_combines_list_and_detail_invalidation(self):
+        product = Product.objects.create(
+            category=self.base_category,
+            name="Cached Product Admin Change",
+            slug="cached-product-admin-change",
+            description="Cached before product admin update",
+            price=Decimal("100.00"),
+            stock=1,
+            status=Product.Status.ACTIVE,
+        )
+        detail_cache_key = make_product_detail_cache_key(product.id)
+        cached_detail = {"id": product.id, "name": product.name}
+        cache.set(detail_cache_key, cached_detail, timeout=300)
+        version_before = get_product_list_cache_version()
+        model_admin = admin.site._registry[Product]
+        product.name = "Renamed Through Django Admin"
+
+        with self.captureOnCommitCallbacks(execute=False) as callbacks:
+            model_admin.save_model(
+                self.request,
+                product,
+                form=None,
+                change=True,
+            )
+
+        self.assertEqual(len(callbacks), 1)
+        self.assertEqual(get_product_list_cache_version(), version_before)
+        self.assertEqual(cache.get(detail_cache_key), cached_detail)
+
+        callbacks[0]()
+
+        self.assertEqual(
+            get_product_list_cache_version(),
+            version_before + 1,
+        )
+        self.assertIsNone(cache.get(detail_cache_key))
+
+    def test_product_admin_bulk_delete_invalidates_deleted_product_details(self):
+        products = Product.objects.bulk_create(
+            [
+                Product(
+                    category=self.base_category,
+                    name="Cached Bulk Product One",
+                    slug="cached-bulk-product-one",
+                    description="Cached before bulk delete",
+                    price=Decimal("100.00"),
+                    stock=1,
+                    status=Product.Status.ACTIVE,
+                ),
+                Product(
+                    category=self.base_category,
+                    name="Cached Bulk Product Two",
+                    slug="cached-bulk-product-two",
+                    description="Cached before bulk delete",
+                    price=Decimal("200.00"),
+                    stock=2,
+                    status=Product.Status.ACTIVE,
+                ),
+            ]
+        )
+        product_ids = tuple(product.id for product in products)
+        detail_cache_keys = tuple(
+            make_product_detail_cache_key(product_id)
+            for product_id in product_ids
+        )
+        cached_details = {
+            cache_key: {"id": product_id}
+            for cache_key, product_id in zip(detail_cache_keys, product_ids)
+        }
+        cache.set_many(cached_details, timeout=300)
+        version_before = get_product_list_cache_version()
+        model_admin = admin.site._registry[Product]
+        queryset = Product.objects.filter(id__in=product_ids)
+
+        with self.captureOnCommitCallbacks(execute=False) as callbacks:
+            model_admin.delete_queryset(self.request, queryset)
+
+        self.assertEqual(len(callbacks), 1)
+        self.assertFalse(Product.objects.filter(id__in=product_ids).exists())
+        self.assertEqual(get_product_list_cache_version(), version_before)
+        self.assertEqual(cache.get_many(detail_cache_keys), cached_details)
+
+        callbacks[0]()
+
+        self.assertEqual(
+            get_product_list_cache_version(),
+            version_before + 1,
+        )
+        self.assertEqual(cache.get_many(detail_cache_keys), {})
+
 
 class ProductApiTests(APITestCase):
     def setUp(self):
@@ -786,29 +876,35 @@ class ProductApiTests(APITestCase):
         }
 
         before_create = get_product_list_cache_version()
-        create_response = self.client.post(
-            reverse("admin-product-list"),
-            payload,
-            format="json",
-        )
+        with self.captureOnCommitCallbacks(execute=True) as create_callbacks:
+            create_response = self.client.post(
+                reverse("admin-product-list"),
+                payload,
+                format="json",
+            )
         created_id = create_response.data["data"]["id"]
         self.assertEqual(create_response.status_code, 201)
+        self.assertEqual(len(create_callbacks), 1)
         self.assertEqual(get_product_list_cache_version(), before_create + 1)
 
         before_update = get_product_list_cache_version()
-        update_response = self.client.patch(
-            reverse("admin-product-detail", args=[created_id]),
-            {"price": "600.00"},
-            format="json",
-        )
+        with self.captureOnCommitCallbacks(execute=True) as update_callbacks:
+            update_response = self.client.patch(
+                reverse("admin-product-detail", args=[created_id]),
+                {"price": "600.00"},
+                format="json",
+            )
         self.assertEqual(update_response.status_code, 200)
+        self.assertEqual(len(update_callbacks), 1)
         self.assertEqual(get_product_list_cache_version(), before_update + 1)
 
         before_destroy = get_product_list_cache_version()
-        destroy_response = self.client.delete(
-            reverse("admin-product-detail", args=[created_id])
-        )
+        with self.captureOnCommitCallbacks(execute=True) as destroy_callbacks:
+            destroy_response = self.client.delete(
+                reverse("admin-product-detail", args=[created_id])
+            )
         self.assertEqual(destroy_response.status_code, 200)
+        self.assertEqual(len(destroy_callbacks), 1)
         self.assertEqual(get_product_list_cache_version(), before_destroy + 1)
 
     def test_admin_category_create_update_destroy_increment_list_version(self):
@@ -820,29 +916,35 @@ class ProductApiTests(APITestCase):
         }
 
         before_create = get_product_list_cache_version()
-        create_response = self.client.post(
-            reverse("admin-category-list"),
-            payload,
-            format="json",
-        )
+        with self.captureOnCommitCallbacks(execute=True) as create_callbacks:
+            create_response = self.client.post(
+                reverse("admin-category-list"),
+                payload,
+                format="json",
+            )
         created_id = create_response.data["data"]["id"]
         self.assertEqual(create_response.status_code, 201)
+        self.assertEqual(len(create_callbacks), 1)
         self.assertEqual(get_product_list_cache_version(), before_create + 1)
 
         before_update = get_product_list_cache_version()
-        update_response = self.client.patch(
-            reverse("admin-category-detail", args=[created_id]),
-            {"name": "Renamed Cache Category"},
-            format="json",
-        )
+        with self.captureOnCommitCallbacks(execute=True) as update_callbacks:
+            update_response = self.client.patch(
+                reverse("admin-category-detail", args=[created_id]),
+                {"name": "Renamed Cache Category"},
+                format="json",
+            )
         self.assertEqual(update_response.status_code, 200)
+        self.assertEqual(len(update_callbacks), 1)
         self.assertEqual(get_product_list_cache_version(), before_update + 1)
 
         before_destroy = get_product_list_cache_version()
-        destroy_response = self.client.delete(
-            reverse("admin-category-detail", args=[created_id])
-        )
+        with self.captureOnCommitCallbacks(execute=True) as destroy_callbacks:
+            destroy_response = self.client.delete(
+                reverse("admin-category-detail", args=[created_id])
+            )
         self.assertEqual(destroy_response.status_code, 200)
+        self.assertEqual(len(destroy_callbacks), 1)
         self.assertEqual(get_product_list_cache_version(), before_destroy + 1)
 
     def test_admin_product_update_refreshes_cached_public_list(self):
@@ -853,11 +955,12 @@ class ProductApiTests(APITestCase):
         )
 
         self.client.force_authenticate(self.admin)
-        update_response = self.client.patch(
-            reverse("admin-product-detail", args=[self.active_product.id]),
-            {"name": "Updated MacBook"},
-            format="json",
-        )
+        with self.captureOnCommitCallbacks(execute=True):
+            update_response = self.client.patch(
+                reverse("admin-product-detail", args=[self.active_product.id]),
+                {"name": "Updated MacBook"},
+                format="json",
+            )
         self.assertEqual(update_response.status_code, 200)
 
         self.client.force_authenticate(user=None)
@@ -865,6 +968,35 @@ class ProductApiTests(APITestCase):
         names = [item["name"] for item in second_response.data["data"]["results"]]
         self.assertIn("Updated MacBook", names)
         self.assertNotIn("MacBook Pro 14", names)
+
+    def test_admin_product_update_rollback_preserves_product_caches(self):
+        original_name = self.active_product.name
+        detail_url = reverse("product-detail", args=[self.active_product.id])
+        self.client.get(detail_url)
+        detail_cache_key = make_product_detail_cache_key(self.active_product.id)
+        cached_detail = cache.get(detail_cache_key)
+        version_before = get_product_list_cache_version()
+        self.client.force_authenticate(self.admin)
+
+        try:
+            with transaction.atomic():
+                response = self.client.patch(
+                    reverse(
+                        "admin-product-detail",
+                        args=[self.active_product.id],
+                    ),
+                    {"name": "Rolled Back Product"},
+                    format="json",
+                )
+                self.assertEqual(response.status_code, 200)
+                raise RuntimeError("force rollback")
+        except RuntimeError as exc:
+            self.assertEqual(str(exc), "force rollback")
+
+        self.active_product.refresh_from_db()
+        self.assertEqual(self.active_product.name, original_name)
+        self.assertEqual(cache.get(detail_cache_key), cached_detail)
+        self.assertEqual(get_product_list_cache_version(), version_before)
 
     def test_category_deactivation_refreshes_cached_public_list(self):
         first_response = self.client.get(reverse("product-list"))
@@ -874,9 +1006,10 @@ class ProductApiTests(APITestCase):
         )
 
         self.client.force_authenticate(self.admin)
-        destroy_response = self.client.delete(
-            reverse("admin-category-detail", args=[self.category.id])
-        )
+        with self.captureOnCommitCallbacks(execute=True):
+            destroy_response = self.client.delete(
+                reverse("admin-category-detail", args=[self.category.id])
+            )
         self.assertEqual(destroy_response.status_code, 200)
 
         self.client.force_authenticate(user=None)
@@ -964,26 +1097,29 @@ class ProductApiTests(APITestCase):
 
     def test_category_update_rollback_does_not_delete_detail_cache(self):
         original_name = self.category.name
+        detail_url = reverse("product-detail", args=[self.active_product.id])
+        self.client.get(detail_url)
+        detail_cache_key = make_product_detail_cache_key(self.active_product.id)
+        cached_detail = cache.get(detail_cache_key)
+        version_before = get_product_list_cache_version()
         self.client.force_authenticate(self.admin)
 
-        with patch(
-            "apps.products.views.delete_category_product_detail_caches"
-        ) as detail_invalidation:
-            try:
-                with transaction.atomic():
-                    response = self.client.patch(
-                        reverse("admin-category-detail", args=[self.category.id]),
-                        {"name": "Rolled Back Category"},
-                        format="json",
-                    )
-                    self.assertEqual(response.status_code, 200)
-                    raise RuntimeError("force rollback")
-            except RuntimeError as exc:
-                self.assertEqual(str(exc), "force rollback")
+        try:
+            with transaction.atomic():
+                response = self.client.patch(
+                    reverse("admin-category-detail", args=[self.category.id]),
+                    {"name": "Rolled Back Category"},
+                    format="json",
+                )
+                self.assertEqual(response.status_code, 200)
+                raise RuntimeError("force rollback")
+        except RuntimeError as exc:
+            self.assertEqual(str(exc), "force rollback")
 
-        detail_invalidation.assert_not_called()
         self.category.refresh_from_db()
         self.assertEqual(self.category.name, original_name)
+        self.assertEqual(cache.get(detail_cache_key), cached_detail)
+        self.assertEqual(get_product_list_cache_version(), version_before)
 
     def test_admin_public_detail_does_not_populate_public_cache(self):
         self.category.is_active = False

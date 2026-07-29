@@ -19,10 +19,10 @@ from apps.products.serializers import (
 )
 from apps.products.services import (
     canonicalize_product_list_pagination_links,
-    delete_category_product_detail_caches,
-    delete_product_detail_cache,
     get_product_detail_cache,
     get_product_list_cache,
+    invalidate_category_caches,
+    invalidate_product_caches,
     invalidate_product_list_cache,
     make_product_list_cache_key,
     set_product_detail_cache,
@@ -83,21 +83,20 @@ class AdminCategoryViewSet(ApiModelViewSetResponseMixin, viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         serializer.save()
-        invalidate_product_list_cache()
+        transaction.on_commit(invalidate_product_list_cache)
 
     def perform_update(self, serializer):
         category = serializer.save()
-        invalidate_product_list_cache()
         transaction.on_commit(
-            partial(delete_category_product_detail_caches, category.id)
+            partial(invalidate_category_caches, category.id)
         )
 
     def perform_destroy(self, instance):
+        category_id = instance.id
         instance.is_active = False
         instance.save(update_fields=["is_active", "updated_at"])
-        invalidate_product_list_cache()
         transaction.on_commit(
-            partial(delete_category_product_detail_caches, instance.id)
+            partial(invalidate_category_caches, category_id)
         )
 
 
@@ -218,16 +217,20 @@ class AdminProductViewSet(ApiModelViewSetResponseMixin, viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         product = serializer.save()
-        delete_product_detail_cache(product.id)
-        invalidate_product_list_cache()
+        transaction.on_commit(
+            partial(invalidate_product_caches, (product.id,))
+        )
 
     def perform_update(self, serializer):
         product = serializer.save()
-        delete_product_detail_cache(product.id)
-        invalidate_product_list_cache()
+        transaction.on_commit(
+            partial(invalidate_product_caches, (product.id,))
+        )
 
     def perform_destroy(self, instance):
+        product_id = instance.id
         instance.status = Product.Status.INACTIVE
         instance.save(update_fields=["status", "updated_at"])
-        delete_product_detail_cache(instance.id)
-        invalidate_product_list_cache()
+        transaction.on_commit(
+            partial(invalidate_product_caches, (product_id,))
+        )

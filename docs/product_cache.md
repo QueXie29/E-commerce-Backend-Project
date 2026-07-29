@@ -493,7 +493,7 @@ def set_product_detail_cache(product_id: int, data) -> None:
 
 写入失败只记录 warning，用户仍能收到刚从数据库序列化出的正确响应。
 
-### 4.5 如何删除单个商品详情缓存
+### 4.5 如何删除单个或一批商品详情缓存
 
 ```python
 def delete_product_detail_cache(product_id: int) -> None:
@@ -510,6 +510,33 @@ product:detail:{product_id}
 ```
 
 删除后，该商品下一次公共详情请求会重新查询数据库、重新序列化并写入一个新的 300 秒缓存。
+
+下单、取消订单和 Django Admin 批量删除需要一次清理多个明确的商品 ID，因此使用批量函数：
+
+```python
+def delete_product_detail_caches(product_ids) -> None:
+    try:
+        cache_keys = [
+            make_product_detail_cache_key(product_id)
+            for product_id in dict.fromkeys(product_ids)
+        ]
+        if cache_keys:
+            cache.delete_many(cache_keys)
+    except Exception as exc:
+        logger.warning("Failed to delete product detail caches: %s", exc)
+```
+
+`dict.fromkeys(product_ids)` 用于按输入顺序去重。函数只构造传入商品 ID 对应的详情键，不扫描 Redis，也不会删除无关商品。
+
+商品列表和一批详情的组合失效函数为：
+
+```python
+def invalidate_product_caches(product_ids) -> None:
+    delete_product_detail_caches(product_ids)
+    invalidate_product_list_cache()
+```
+
+组合函数先删除详情键，再切换列表版本。两个底层操作都采用 fail-open，Redis 删除失败时仍会继续尝试切换列表版本，数据库事务不会因此回滚。
 
 ### 4.6 如何按分类批量删除详情缓存
 
@@ -543,8 +570,8 @@ def delete_category_product_detail_caches(category_id: int) -> None:
 
 ```python
 def invalidate_category_caches(category_id: int) -> None:
-    invalidate_product_list_cache()
     delete_category_product_detail_caches(category_id)
+    invalidate_product_list_cache()
 ```
 
 它同时解决两个问题：
@@ -556,29 +583,29 @@ def invalidate_category_caches(category_id: int) -> None:
 
 | 业务入口 | 操作 | 删除范围 | 触发时机 |
 | --- | --- | --- | --- |
-| 管理商品 API | 创建商品 | 新商品的单个详情键 | 保存后立即调用，属于防御性清理 |
-| 管理商品 API | 修改商品 | 该商品的单个详情键 | 保存后立即调用 |
-| 管理商品 API | 商品软删除/下架 | 该商品的单个详情键 | 状态保存后立即调用 |
-| 创建订单 | 库存减少、销量增加 | 订单中每个商品的详情键 | 每个商品保存后调用 |
-| 取消订单 | 库存恢复、销量减少 | 订单中每个商品的详情键 | 每个商品保存后调用 |
+| 管理商品 API | 创建商品 | 新商品的单个详情键 | 事务提交后的组合回调 |
+| 管理商品 API | 修改商品 | 该商品的单个详情键 | 事务提交后的组合回调 |
+| 管理商品 API | 商品软删除/下架 | 该商品的单个详情键 | 事务提交后的组合回调 |
+| 创建订单 | 库存减少、销量增加 | 订单中全部商品的详情键 | 事务提交后一次批量删除 |
+| 取消订单 | 库存恢复、销量减少 | 订单中全部商品的详情键 | 事务提交后一次批量删除 |
 | 管理分类 API | 创建分类 | 不删除详情 | 新分类还没有依赖它的旧详情数据 |
-| 管理分类 API | 修改分类 | 该分类下全部商品详情键 | `transaction.on_commit()` |
-| 管理分类 API | 分类软删除/停用 | 该分类下全部商品详情键 | `transaction.on_commit()` |
+| 管理分类 API | 修改分类 | 该分类下全部商品详情键 | 事务提交后的组合回调 |
+| 管理分类 API | 分类软删除/停用 | 该分类下全部商品详情键 | 事务提交后的组合回调 |
 | Django Admin 分类 | 单个保存、单个删除 | 该分类下全部商品详情键 | 事务提交后的组合回调 |
 | Django Admin 分类 | 批量删除 | 不批量删详情，只失效列表 | 默认 mixin 回调 |
-| Django Admin 商品 | 保存、删除、批量删除 | 当前实现不删除详情 | 只递增列表版本 |
+| Django Admin 商品 | 保存、单个删除 | 该商品的单个详情键 | 事务提交后的组合回调 |
+| Django Admin 商品 | 批量删除 | 删除商品对应的全部详情键 | 提交后一次批量删除 |
 | 支付订单 | 修改支付状态 | 不删除详情 | 商品数据没有变化 |
 
-### 4.8 分类 API 为什么使用 `transaction.on_commit()`
+### 4.8 为什么写操作统一使用 `transaction.on_commit()`
 
 分类更新代码：
 
 ```python
 def perform_update(self, serializer):
     category = serializer.save()
-    invalidate_product_list_cache()
     transaction.on_commit(
-        partial(delete_category_product_detail_caches, category.id)
+        partial(invalidate_category_caches, category.id)
     )
 ```
 
@@ -586,26 +613,24 @@ def perform_update(self, serializer):
 
 ```python
 def perform_destroy(self, instance):
+    category_id = instance.id
     instance.is_active = False
     instance.save(update_fields=["is_active", "updated_at"])
-    invalidate_product_list_cache()
     transaction.on_commit(
-        partial(delete_category_product_detail_caches, instance.id)
+        partial(invalidate_category_caches, category_id)
     )
 ```
 
-`partial()` 先保存将来调用函数所需的 `category.id`，但不会立即执行删除。`transaction.on_commit()` 只在数据库事务成功提交后运行回调。
+`partial()` 先保存将来调用函数所需的 ID，但不会立即执行缓存失效。`transaction.on_commit()` 只在数据库事务成功提交后运行回调。
 
 这样可以避免以下情况：
 
-1. 分类修改暂时写入数据库。
-2. 详情缓存被删除。
+1. 商品、分类或库存变化暂时写入数据库。
+2. 缓存提前删除或列表提前切换到新版本。
 3. 后续异常导致数据库事务回滚。
-4. 数据库其实没有变化，却白白丢失了缓存。
+4. 数据库没有变化，但缓存已经被无意义清理。
 
-即使缓存删除失败，`delete_category_product_detail_caches()` 也会捕获异常，已经成功提交的分类更新不会因为 Redis 故障变成接口失败。
-
-补充说明：列表版本在当前分类 API 代码中是立即递增的，不在 `on_commit()` 回调中。若外层事务后来回滚，可能产生一次不必要的列表缓存 miss，但不会向用户返回旧数据；详情缓存删除则严格等待事务提交。
+更重要的是，详情键在数据库提交后才删除，关闭了“事务提交前删除详情键，并发请求读取旧数据库值并重新写入旧详情”的时间窗。即使缓存操作失败，底层函数也只记录 warning，已经成功提交的数据库业务不会因为 Redis 故障变成接口失败。
 
 ---
 
@@ -616,48 +641,52 @@ def perform_destroy(self, instance):
 ```python
 def perform_update(self, serializer):
     product = serializer.save()
-    delete_product_detail_cache(product.id)
-    invalidate_product_list_cache()
+    transaction.on_commit(
+        partial(invalidate_product_caches, (product.id,))
+    )
 ```
 
 商品修改后：
 
-1. 删除该商品的详情键。
-2. 递增列表版本，使所有列表参数组合同时失效。
-3. 下一次列表和详情请求都从数据库重建缓存。
+1. 数据库更新先成功提交。
+2. 提交回调删除该商品的详情键。
+3. 回调递增列表版本，使所有列表参数组合同时失效。
+4. 下一次列表和详情请求都从数据库重建缓存。
 
-创建和软删除使用相同思路。软删除会先把状态设置为 `inactive`，再删除详情缓存，因此普通用户下一次访问会经过数据库可见性过滤并得到 404。
+创建和软删除使用相同思路。软删除会提前保存商品 ID，把状态设置为 `inactive`，提交成功后再删除详情缓存，因此普通用户下一次访问会经过数据库可见性过滤并得到 404。外层事务如果回滚，列表版本和详情缓存都保持不变。
 
 ### 5.2 管理分类 API
 
-分类创建只递增列表版本。分类更新和停用除了递增列表版本，还会在事务提交后批量删除该分类下的详情键。
+分类创建在提交后递增列表版本。分类更新和停用在提交后运行一次 `invalidate_category_caches()`，先批量删除该分类下的详情键，再递增列表版本。
 
 分类停用后，如果不删除详情缓存，匿名用户可能继续命中旧的 `product:detail:{id}`，绕过 `category__is_active=True` 的数据库过滤。批量删除正是为了关闭这条旧数据路径。
 
 ### 5.3 创建订单
 
-创建订单时，每个商品都会发生：
+创建订单时，事务内部只修改数据库并收集受影响的商品 ID：
 
 ```python
 product.stock -= cart_item.quantity
 product.sales_count += cart_item.quantity
 product.save(update_fields=["stock", "sales_count", "updated_at"])
-delete_product_detail_cache(product.id)
 ```
 
-事务末尾注册：
+事务末尾只注册一个组合失效回调：
 
 ```python
-transaction.on_commit(invalidate_product_list_cache)
+transaction.on_commit(
+    partial(invalidate_product_caches, affected_product_ids)
+)
 ```
 
 所以：
 
-- 每个受影响商品的详情缓存被删除；
-- 订单事务成功提交后，商品列表版本只递增一次；
+- 事务提交前不提前删除详情缓存；
+- 订单事务成功提交后，一次批量删除所有受影响商品的详情缓存；
+- 商品列表版本只递增一次；
 - 即使订单包含多个商品，也不会为每个商品重复递增列表版本。
 
-详情键在事务内部被删除。如果订单事务之后回滚，数据库仍是旧数据，但详情缓存已经被删；这只会造成下一次请求重新查询数据库，不会产生脏缓存。
+如果订单事务回滚，提交回调不会执行，详情缓存和列表版本都保持不变。如果事务提交前有并发请求把旧数据库值重新写入详情缓存，提交后的组合回调仍会将旧详情删除。
 
 ### 5.4 取消订单
 
@@ -667,10 +696,9 @@ transaction.on_commit(invalidate_product_list_cache)
 product.stock += item.quantity
 product.sales_count = max(product.sales_count - item.quantity, 0)
 product.save(update_fields=["stock", "sales_count", "updated_at"])
-delete_product_detail_cache(product.id)
 ```
 
-事务提交后再递增一次列表版本。支付订单只修改订单状态，没有修改商品，所以不会触发商品缓存失效。
+取消过程同样收集商品 ID，并在事务提交后调用一次 `invalidate_product_caches()`，批量删除详情并递增一次列表版本。支付订单只修改订单状态，没有修改商品，所以不会触发商品缓存失效。
 
 ### 5.5 Django Admin
 
@@ -686,7 +714,7 @@ class ProductListCacheInvalidationAdminMixin:
         transaction.on_commit(self.get_cache_invalidation_callback(obj))
 ```
 
-默认情况下，Admin 操作只递增商品列表版本。
+默认情况下，mixin 使用列表失效回调；具体 Admin 可以为单对象和批量 QuerySet 提供组合失效回调。
 
 `CategoryAdmin` 对单对象操作覆盖回调：
 
@@ -699,12 +727,27 @@ def get_cache_invalidation_callback(self, obj=None):
 
 因此分类单个保存或删除只注册一个回调，但这个回调会同时：
 
-1. 递增商品列表缓存版本；
-2. 批量删除该分类下的商品详情缓存。
+1. 批量删除该分类下的商品详情缓存；
+2. 递增商品列表缓存版本。
 
 `delete_model()` 会在真正删除对象前创建回调，因为 Django 删除成功后可能清空对象的主键；提前用 `partial()` 捕获 ID，可以保留正确的分类 ID。
 
 分类批量删除时传入的是整个 QuerySet，没有单个 `obj`，所以使用默认的列表失效回调。`Product.category` 使用 `PROTECT`，仍有商品关联的分类不能成功删除；成功硬删除的分类通常没有需要清理的商品详情键。
+
+`ProductAdmin` 对单对象回调绑定一个商品 ID，对批量删除则在执行数据库删除前固化 QuerySet 中的全部商品 ID：
+
+```python
+def get_cache_invalidation_callback(self, obj=None):
+    if obj is None:
+        return super().get_cache_invalidation_callback(obj)
+    return partial(invalidate_product_caches, (obj.id,))
+
+def get_queryset_cache_invalidation_callback(self, queryset):
+    product_ids = tuple(queryset.values_list("id", flat=True))
+    return partial(invalidate_product_caches, product_ids)
+```
+
+因此 Django Admin 商品保存、单个删除和批量删除都会在提交后删除对应详情键，并只递增一次列表版本。
 
 ---
 
@@ -837,8 +880,9 @@ category.save()
 如果脚本、Django shell、数据修复任务或其他新服务直接修改模型，调用方需要主动调用对应函数：
 
 ```python
-delete_product_detail_cache(product.id)
-invalidate_product_list_cache()
+transaction.on_commit(
+    partial(invalidate_product_caches, (product.id,))
+)
 ```
 
 分类发生变化时使用：
@@ -847,17 +891,13 @@ invalidate_product_list_cache()
 invalidate_category_caches(category.id)
 ```
 
-事务中的分类详情失效应优先注册到 `transaction.on_commit()`。
+事务中的商品和分类缓存失效都应注册到 `transaction.on_commit()`。
 
-### 8.2 Django Admin 的商品操作目前只失效列表缓存
+### 8.2 自定义 Django Admin 动作仍需显式接入
 
-`ProductAdmin` 没有覆盖 `get_cache_invalidation_callback()`，所以它继承的回调只是：
+当前 `ProductAdmin` 已覆盖单对象和批量 QuerySet 回调，因此标准保存、单个删除和批量删除都会处理列表与详情缓存。
 
-```python
-invalidate_product_list_cache
-```
-
-也就是说，在 Django Admin 页面直接修改商品时，列表缓存会失效，但现有详情缓存不会被主动删除，最迟等待 300 秒 TTL 自动过期。这是当前代码的真实行为，不应和 `/api/admin/products/` 的管理商品 API 混为一谈。
+如果未来增加自定义 Admin action，并且该 action 使用 `QuerySet.update()` 或绕过 `save_model()`、`delete_model()`、`delete_queryset()`，仍需在 action 成功后显式注册 `invalidate_product_caches()` 或 `invalidate_category_caches()`。
 
 ### 8.3 分类批量硬删除只处理列表缓存
 
@@ -888,14 +928,16 @@ invalidate_product_list_cache
 - 非法筛选的 400 响应不会写缓存；
 - Redis 读写或递增失败时退回数据库；
 - 商品管理 API 增、改、软删除会递增列表版本；
+- 商品管理 API 外层事务回滚时保留原详情缓存和列表版本；
 - 分类管理 API 增、改、停用会递增列表版本；
 - 分类更新后，已缓存详情会显示新的分类名称和 slug；
 - 分类停用后，旧详情键被删除，匿名请求返回 404；
 - 分类详情批量删除只影响目标分类；
 - 缓存删除失败不会让分类更新 API 失败；
-- 分类事务回滚时不执行详情删除回调；
+- 分类事务回滚时不删除详情缓存，也不递增列表版本；
+- Django Admin 商品单个保存和批量删除会同时处理列表与详情缓存；
 - Django Admin 每次操作只注册一个提交回调；
-- 下单和取消订单在提交后只递增一次列表版本；
+- 下单和取消订单在提交后批量删除详情，并只递增一次列表版本；
 - 订单事务回滚时不递增列表版本；
 - 支付订单不会无意义地失效商品列表缓存。
 
@@ -910,6 +952,6 @@ invalidate_product_list_cache
 5. 分类信息嵌入商品详情，所以分类修改或停用必须批量删除关联详情键。
 6. 管理员不能读取或写入公共商品缓存，否则可能污染公共数据可见性。
 7. 修改库存或销量的下单、取消订单也必须处理两套商品缓存。
-8. `transaction.on_commit()` 用来避免数据库回滚后仍执行详情缓存删除。
+8. `transaction.on_commit()` 用来避免数据库回滚后提前删除详情或切换列表版本，并关闭提交前旧详情重新写入的时间窗。
 9. Redis 异常采用 fail-open，数据库业务优先正常完成。
 10. 当前没有 signals，直接 ORM 修改不会自动触发缓存失效。

@@ -9,7 +9,10 @@ from apps.carts.models import CartItem
 from apps.orders.models import Order
 from apps.orders.services import ORDER_CREATE_LOCK_KEY
 from apps.products.models import Category, Product
-from apps.products.services import get_product_list_cache_version
+from apps.products.services import (
+    get_product_list_cache_version,
+    make_product_detail_cache_key,
+)
 
 
 User = get_user_model()
@@ -122,12 +125,27 @@ class OrderApiTests(APITestCase):
         CartItem.objects.create(user=self.user, product=self.product, quantity=1)
         CartItem.objects.create(user=self.user, product=second_product, quantity=1)
         version_before = get_product_list_cache_version()
+        detail_cache_keys = (
+            make_product_detail_cache_key(self.product.id),
+            make_product_detail_cache_key(second_product.id),
+        )
+        stale_details = {
+            detail_cache_keys[0]: {"stock": 5, "sales_count": 0},
+            detail_cache_keys[1]: {"stock": 4, "sales_count": 0},
+        }
+        cache.set_many(stale_details, timeout=300)
 
-        with self.captureOnCommitCallbacks(execute=True) as callbacks:
+        with self.captureOnCommitCallbacks(execute=False) as callbacks:
             response = self.client.post(reverse("order-list"), {}, format="json")
 
         self.assertEqual(response.status_code, 201)
         self.assertEqual(len(callbacks), 1)
+        self.assertEqual(cache.get_many(detail_cache_keys), stale_details)
+        self.assertEqual(get_product_list_cache_version(), version_before)
+
+        callbacks[0]()
+
+        self.assertEqual(cache.get_many(detail_cache_keys), {})
         self.assertEqual(get_product_list_cache_version(), version_before + 1)
 
     def test_order_creation_rollback_does_not_invalidate_list_cache(self):
@@ -152,14 +170,23 @@ class OrderApiTests(APITestCase):
         order_id = create_response.data["data"]["id"]
         self.assertEqual(len(create_callbacks), 1)
         version_before_cancel = get_product_list_cache_version()
+        detail_cache_key = make_product_detail_cache_key(self.product.id)
+        stale_detail = {"stock": 4, "sales_count": 1}
+        cache.set(detail_cache_key, stale_detail, timeout=300)
 
-        with self.captureOnCommitCallbacks(execute=True) as cancel_callbacks:
+        with self.captureOnCommitCallbacks(execute=False) as cancel_callbacks:
             cancel_response = self.client.post(
                 reverse("order-cancel", args=[order_id])
             )
 
         self.assertEqual(cancel_response.status_code, 200)
         self.assertEqual(len(cancel_callbacks), 1)
+        self.assertEqual(cache.get(detail_cache_key), stale_detail)
+        self.assertEqual(get_product_list_cache_version(), version_before_cancel)
+
+        cancel_callbacks[0]()
+
+        self.assertIsNone(cache.get(detail_cache_key))
         self.assertEqual(
             get_product_list_cache_version(),
             version_before_cancel + 1,

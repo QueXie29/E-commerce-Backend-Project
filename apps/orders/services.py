@@ -1,6 +1,7 @@
 import uuid
 import logging
 from decimal import Decimal
+from functools import partial
 
 from django.core.cache import cache
 from django.db import transaction
@@ -12,10 +13,7 @@ from apps.common.exceptions import BusinessException
 from apps.common.permissions import is_admin_user
 from apps.orders.models import Order, OrderItem
 from apps.products.models import Product
-from apps.products.services import (
-    delete_product_detail_cache,
-    invalidate_product_list_cache,
-)
+from apps.products.services import invalidate_product_caches
 
 
 logger = logging.getLogger(__name__)
@@ -60,6 +58,7 @@ def create_order_from_cart(user, remark: str = "") -> Order:
                 .filter(id__in=product_ids)
             )
             product_map = {product.id: product for product in products}
+            affected_product_ids = tuple(sorted(product_map))
 
             order = Order.objects.create(
                 order_no=generate_order_no(),
@@ -98,7 +97,6 @@ def create_order_from_cart(user, remark: str = "") -> Order:
                 product.stock -= cart_item.quantity
                 product.sales_count += cart_item.quantity
                 product.save(update_fields=["stock", "sales_count", "updated_at"])
-                delete_product_detail_cache(product.id)
 
                 order_items.append(
                     OrderItem(
@@ -115,7 +113,9 @@ def create_order_from_cart(user, remark: str = "") -> Order:
             order.total_amount = total_amount
             order.save(update_fields=["total_amount", "updated_at"])
             CartItem.objects.filter(id__in=[item.id for item in cart_items]).delete()
-            transaction.on_commit(invalidate_product_list_cache)
+            transaction.on_commit(
+                partial(invalidate_product_caches, affected_product_ids)
+            )
 
             return get_order_for_response(order.id)
     finally:
@@ -167,16 +167,20 @@ def cancel_order(user, order_id: int) -> Order:
             raise BusinessException("订单状态不允许取消", code=40004)
 
         order_items = list(order.items.select_related("product").all())
+        affected_product_ids = tuple(
+            sorted({item.product_id for item in order_items})
+        )
         for item in order_items:
             product = Product.objects.select_for_update().get(id=item.product_id)
             product.stock += item.quantity
             product.sales_count = max(product.sales_count - item.quantity, 0)
             product.save(update_fields=["stock", "sales_count", "updated_at"])
-            delete_product_detail_cache(product.id)
 
         order.status = Order.Status.CANCELLED
         order.cancelled_at = timezone.now()
         order.save(update_fields=["status", "cancelled_at", "updated_at"])
-        transaction.on_commit(invalidate_product_list_cache)
+        transaction.on_commit(
+            partial(invalidate_product_caches, affected_product_ids)
+        )
 
     return get_order_for_response(order.id)
