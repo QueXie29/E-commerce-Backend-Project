@@ -110,6 +110,7 @@ products.Product 1 --- N orders.OrderItem
 | status | CharField | `pending/paid/cancelled` |
 | remark | CharField | 备注 |
 | created_at | DateTimeField | 创建时间 |
+| expires_at | DateTimeField | 固定的支付截止时间 |
 | paid_at | DateTimeField | 支付时间 |
 | cancelled_at | DateTimeField | 取消时间 |
 | updated_at | DateTimeField | 更新时间 |
@@ -163,6 +164,9 @@ with transaction.atomic():
 - `transaction.atomic()` 保证订单、订单明细、库存扣减、购物车删除要么全部成功，要么全部回滚
 - `select_for_update()` 锁定商品行，避免并发请求同时扣减同一库存
 - Redis 锁只用于防止同一用户重复提交，数据库事务和行锁才是库存一致性的最终保障
+- 超时任务、支付和人工取消先锁定订单行再重检 `status`，保证同一订单只有一个状态迁移可以恢复库存
+
+超时扫描使用 `(status, expires_at)` 联合索引定位已到期的 `pending` 订单。`expires_at` 存在 MySQL 中，消息只负责触发处理，不能代替订单状态和截止时间这个业务事实。
 
 ## Redis 设计
 

@@ -1,8 +1,11 @@
 import uuid
 import logging
+from collections import defaultdict
+from datetime import timedelta
 from decimal import Decimal
 from functools import partial
 
+from django.conf import settings
 from django.core.cache import cache
 from django.db import transaction
 from django.shortcuts import get_object_or_404
@@ -21,6 +24,11 @@ logger = logging.getLogger(__name__)
 #防重复提交锁
 ORDER_CREATE_LOCK_KEY = "lock:order:create:user:{user_id}"
 ORDER_CREATE_LOCK_TTL = 10
+
+ORDER_EXPIRY_CANCELLED = "cancelled"
+ORDER_EXPIRY_NOT_DUE = "not_due"
+ORDER_EXPIRY_ALREADY_FINAL = "already_final"
+ORDER_EXPIRY_MISSING = "missing"
 
 #EC + 时间戳 + 随机后缀   EC-20260718153045123456-A8F31C9D
 def generate_order_no() -> str:
@@ -66,6 +74,8 @@ def create_order_from_cart(user, remark: str = "") -> Order:
                 total_amount=Decimal("0.00"),
                 status=Order.Status.PENDING,
                 remark=remark or "",
+                expires_at=timezone.now()
+                + timedelta(seconds=settings.ORDER_PAYMENT_TIMEOUT_SECONDS),
             )
 
             total_amount = Decimal("0.00")
@@ -116,6 +126,9 @@ def create_order_from_cart(user, remark: str = "") -> Order:
             transaction.on_commit(
                 partial(invalidate_product_caches, affected_product_ids)
             )
+            transaction.on_commit(
+                partial(schedule_order_timeout, order.id, order.expires_at)
+            )
 
             return get_order_for_response(order.id)
     finally:
@@ -128,6 +141,20 @@ def release_order_create_lock(lock_key: str, lock_value: str) -> None:
             cache.delete(lock_key)
     except Exception as exc:
         logger.warning("Failed to release order create lock: %s", exc)
+
+
+def schedule_order_timeout(order_id: int, expires_at) -> None:
+    """Publish only after commit; the periodic sweep compensates for publish failures."""
+    try:
+        from apps.orders.tasks import cancel_expired_order
+
+        cancel_expired_order.apply_async(args=(order_id,), eta=expires_at)
+    except Exception:
+        logger.exception(
+            "Failed to publish timeout task for order %s; "
+            "the periodic sweep will retry it",
+            order_id,
+        )
 
 
 def get_order_for_response(order_id: int) -> Order:
@@ -148,14 +175,23 @@ def get_order_for_user(user, order_id: int, for_update: bool = False) -> Order:
 
 
 def pay_order(user, order_id: int) -> Order:
+    expired = False
     with transaction.atomic():
         order = get_order_for_user(user, order_id, for_update=True)
         if order.status != Order.Status.PENDING:
             raise BusinessException("订单状态不允许该操作", code=40004)
 
-        order.status = Order.Status.PAID
-        order.paid_at = timezone.now()
-        order.save(update_fields=["status", "paid_at", "updated_at"])
+        now = timezone.now()
+        if order.expires_at <= now:
+            _cancel_locked_order(order, cancelled_at=now)
+            expired = True
+        else:
+            order.status = Order.Status.PAID
+            order.paid_at = now
+            order.save(update_fields=["status", "paid_at", "updated_at"])
+
+    if expired:
+        raise BusinessException("订单已超时取消", code=40005)
 
     return get_order_for_response(order.id)
 
@@ -166,21 +202,56 @@ def cancel_order(user, order_id: int) -> Order:
         if order.status != Order.Status.PENDING:
             raise BusinessException("订单状态不允许取消", code=40004)
 
-        order_items = list(order.items.select_related("product").all())
-        affected_product_ids = tuple(
-            sorted({item.product_id for item in order_items})
-        )
-        for item in order_items:
-            product = Product.objects.select_for_update().get(id=item.product_id)
-            product.stock += item.quantity
-            product.sales_count = max(product.sales_count - item.quantity, 0)
-            product.save(update_fields=["stock", "sales_count", "updated_at"])
-
-        order.status = Order.Status.CANCELLED
-        order.cancelled_at = timezone.now()
-        order.save(update_fields=["status", "cancelled_at", "updated_at"])
-        transaction.on_commit(
-            partial(invalidate_product_caches, affected_product_ids)
-        )
+        _cancel_locked_order(order)
 
     return get_order_for_response(order.id)
+
+
+def expire_order(order_id: int, now=None) -> str:
+    """Idempotently cancel one overdue order.
+
+    The order row is locked before checking the state and deadline, so payment,
+    manual cancellation, duplicate messages, and timeout messages serialize on
+    the same state transition.
+    """
+    effective_now = now or timezone.now()
+    with transaction.atomic():
+        try:
+            order = Order.objects.select_for_update().get(id=order_id)
+        except Order.DoesNotExist:
+            return ORDER_EXPIRY_MISSING
+
+        if order.status != Order.Status.PENDING:
+            return ORDER_EXPIRY_ALREADY_FINAL
+        if order.expires_at > effective_now:
+            return ORDER_EXPIRY_NOT_DUE
+
+        _cancel_locked_order(order, cancelled_at=effective_now)
+
+    return ORDER_EXPIRY_CANCELLED
+
+
+def _cancel_locked_order(order: Order, cancelled_at=None) -> None:
+    quantities_by_product = defaultdict(int)
+    order_items = order.items.values_list("product_id", "quantity").order_by(
+        "product_id"
+    )
+    for product_id, quantity in order_items:
+        quantities_by_product[product_id] += quantity
+
+    affected_product_ids = tuple(quantities_by_product)
+    products = Product.objects.select_for_update().filter(
+        id__in=affected_product_ids
+    ).order_by("id")
+    for product in products:
+        quantity = quantities_by_product[product.id]
+        product.stock += quantity
+        product.sales_count = max(product.sales_count - quantity, 0)
+        product.save(update_fields=["stock", "sales_count", "updated_at"])
+
+    order.status = Order.Status.CANCELLED
+    order.cancelled_at = cancelled_at or timezone.now()
+    order.save(update_fields=["status", "cancelled_at", "updated_at"])
+    transaction.on_commit(
+        partial(invalidate_product_caches, affected_product_ids)
+    )

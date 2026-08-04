@@ -26,6 +26,7 @@ class Order(models.Model):
     )
     remark = models.CharField(max_length=255, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    expires_at = models.DateTimeField()
     paid_at = models.DateTimeField(null=True, blank=True)
     cancelled_at = models.DateTimeField(null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -36,6 +37,10 @@ class Order(models.Model):
             models.Index(fields=["user"], name="idx_order_user"),
             models.Index(fields=["status"], name="idx_order_status"),
             models.Index(fields=["created_at"], name="idx_order_created_at"),
+            models.Index(
+                fields=["status", "expires_at"],
+                name="idx_order_status_expires",
+            ),
         ]
 
     def __str__(self) -> str:

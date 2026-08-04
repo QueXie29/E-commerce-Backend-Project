@@ -25,7 +25,9 @@ for name, host, port in services:
             time.sleep(2)
 PY
 
-python manage.py migrate
-python manage.py collectstatic --noinput
+if [ "${SKIP_DJANGO_SETUP:-false}" != "true" ]; then
+    python manage.py migrate
+    python manage.py collectstatic --noinput
+fi
 
 exec "$@"

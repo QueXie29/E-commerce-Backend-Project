@@ -1,13 +1,22 @@
 from decimal import Decimal
+from datetime import timedelta
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework.test import APITestCase
 
 from apps.carts.models import CartItem
 from apps.orders.models import Order
-from apps.orders.services import ORDER_CREATE_LOCK_KEY
+from apps.orders.services import (
+    ORDER_CREATE_LOCK_KEY,
+    ORDER_EXPIRY_ALREADY_FINAL,
+    ORDER_EXPIRY_CANCELLED,
+    ORDER_EXPIRY_NOT_DUE,
+)
+from apps.orders.tasks import cancel_expired_order, dispatch_expired_orders
 from apps.products.models import Category, Product
 from apps.products.services import (
     get_product_list_cache_version,
@@ -55,8 +64,25 @@ class OrderApiTests(APITestCase):
 
         order = Order.objects.get(user=self.user)
         self.assertEqual(order.status, Order.Status.PENDING)
+        self.assertGreater(order.expires_at, order.created_at)
         self.assertEqual(order.items.count(), 1)
         self.assertEqual(order.items.first().product_name, "Sony Camera")
+
+    @patch("apps.orders.tasks.cancel_expired_order.apply_async")
+    def test_order_timeout_task_is_published_only_after_commit(self, apply_async):
+        CartItem.objects.create(user=self.user, product=self.product, quantity=1)
+
+        with self.captureOnCommitCallbacks(execute=False) as callbacks:
+            response = self.client.post(reverse("order-list"), {}, format="json")
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(len(callbacks), 2)
+        apply_async.assert_not_called()
+
+        callbacks[1]()
+
+        order = Order.objects.get(id=response.data["data"]["id"])
+        apply_async.assert_called_once_with(args=(order.id,), eta=order.expires_at)
 
     def test_order_create_fails_when_stock_is_insufficient(self):
         CartItem.objects.create(user=self.user, product=self.product, quantity=6)
@@ -139,7 +165,7 @@ class OrderApiTests(APITestCase):
             response = self.client.post(reverse("order-list"), {}, format="json")
 
         self.assertEqual(response.status_code, 201)
-        self.assertEqual(len(callbacks), 1)
+        self.assertEqual(len(callbacks), 2)
         self.assertEqual(cache.get_many(detail_cache_keys), stale_details)
         self.assertEqual(get_product_list_cache_version(), version_before)
 
@@ -168,7 +194,7 @@ class OrderApiTests(APITestCase):
                 format="json",
             )
         order_id = create_response.data["data"]["id"]
-        self.assertEqual(len(create_callbacks), 1)
+        self.assertEqual(len(create_callbacks), 2)
         version_before_cancel = get_product_list_cache_version()
         detail_cache_key = make_product_detail_cache_key(self.product.id)
         stale_detail = {"stock": 4, "sales_count": 1}
@@ -212,3 +238,114 @@ class OrderApiTests(APITestCase):
             get_product_list_cache_version(),
             version_before_payment,
         )
+
+    def test_timeout_task_cancels_order_once_and_restores_stock_once(self):
+        CartItem.objects.create(user=self.user, product=self.product, quantity=2)
+        with self.captureOnCommitCallbacks(execute=True):
+            create_response = self.client.post(
+                reverse("order-list"),
+                {},
+                format="json",
+            )
+        order_id = create_response.data["data"]["id"]
+        Order.objects.filter(id=order_id).update(
+            expires_at=timezone.now() - timedelta(seconds=1)
+        )
+
+        with self.captureOnCommitCallbacks(execute=True):
+            first_result = cancel_expired_order(order_id)
+        second_result = cancel_expired_order(order_id)
+
+        self.assertEqual(first_result, ORDER_EXPIRY_CANCELLED)
+        self.assertEqual(second_result, ORDER_EXPIRY_ALREADY_FINAL)
+        order = Order.objects.get(id=order_id)
+        self.assertEqual(order.status, Order.Status.CANCELLED)
+        self.assertIsNotNone(order.cancelled_at)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 5)
+        self.assertEqual(self.product.sales_count, 0)
+
+    def test_timeout_task_does_not_cancel_before_deadline(self):
+        CartItem.objects.create(user=self.user, product=self.product, quantity=1)
+        with self.captureOnCommitCallbacks(execute=True):
+            create_response = self.client.post(
+                reverse("order-list"),
+                {},
+                format="json",
+            )
+        order_id = create_response.data["data"]["id"]
+
+        result = cancel_expired_order(order_id)
+
+        self.assertEqual(result, ORDER_EXPIRY_NOT_DUE)
+        self.assertEqual(
+            Order.objects.get(id=order_id).status,
+            Order.Status.PENDING,
+        )
+
+    def test_paid_order_is_ignored_by_timeout_task(self):
+        CartItem.objects.create(user=self.user, product=self.product, quantity=1)
+        with self.captureOnCommitCallbacks(execute=True):
+            create_response = self.client.post(
+                reverse("order-list"),
+                {},
+                format="json",
+            )
+        order_id = create_response.data["data"]["id"]
+        pay_response = self.client.post(reverse("order-pay", args=[order_id]))
+
+        result = cancel_expired_order(order_id)
+
+        self.assertEqual(pay_response.status_code, 200)
+        self.assertEqual(result, ORDER_EXPIRY_ALREADY_FINAL)
+        self.assertEqual(
+            Order.objects.get(id=order_id).status,
+            Order.Status.PAID,
+        )
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 4)
+
+    def test_pay_endpoint_cancels_order_when_deadline_has_passed(self):
+        CartItem.objects.create(user=self.user, product=self.product, quantity=1)
+        with self.captureOnCommitCallbacks(execute=True):
+            create_response = self.client.post(
+                reverse("order-list"),
+                {},
+                format="json",
+            )
+        order_id = create_response.data["data"]["id"]
+        Order.objects.filter(id=order_id).update(
+            expires_at=timezone.now() - timedelta(seconds=1)
+        )
+
+        with self.captureOnCommitCallbacks(execute=True):
+            pay_response = self.client.post(reverse("order-pay", args=[order_id]))
+
+        self.assertEqual(pay_response.status_code, 400)
+        self.assertEqual(pay_response.data["code"], 40005)
+        self.assertEqual(
+            Order.objects.get(id=order_id).status,
+            Order.Status.CANCELLED,
+        )
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 5)
+        self.assertEqual(self.product.sales_count, 0)
+
+    @patch("apps.orders.tasks.cancel_expired_order.delay")
+    def test_sweep_dispatches_only_overdue_pending_orders(self, delay):
+        CartItem.objects.create(user=self.user, product=self.product, quantity=1)
+        with self.captureOnCommitCallbacks(execute=True):
+            create_response = self.client.post(
+                reverse("order-list"),
+                {},
+                format="json",
+            )
+        expired_order_id = create_response.data["data"]["id"]
+        Order.objects.filter(id=expired_order_id).update(
+            expires_at=timezone.now() - timedelta(seconds=1)
+        )
+
+        dispatched_count = dispatch_expired_orders()
+
+        self.assertEqual(dispatched_count, 1)
+        delay.assert_called_once_with(expired_order_id)

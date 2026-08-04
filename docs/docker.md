@@ -10,13 +10,15 @@
 
 ## 1. Docker 部署会启动什么
 
-本项目的 `docker-compose.yml` 会启动 4 个服务：
+本项目的 `docker-compose.yml` 会启动 6 个服务：
 
 | 服务名 | 容器名 | 作用 | 容器内端口 | 默认映射到本机 |
 |---|---|---|---|---|
 | `mysql` | `mini_ecommerce_mysql` | MySQL 8.0 数据库 | `3306` | `127.0.0.1:3307` |
-| `redis` | `mini_ecommerce_redis` | Redis 缓存和订单锁 | `6379` | `127.0.0.1:6379` |
+| `redis` | `mini_ecommerce_redis` | Redis 缓存、订单锁和 Celery Broker | `6379` | `127.0.0.1:6379` |
 | `web` | `mini_ecommerce_web` | Django + Gunicorn | `8000` | 不直接暴露 |
+| `celery_worker` | `mini_ecommerce_celery_worker` | 消费订单超时任务 | 无 | 不暴露 |
+| `celery_beat` | `mini_ecommerce_celery_beat` | 周期扫描到期订单并补偿入队 | 无 | 不暴露 |
 | `nginx` | `mini_ecommerce_nginx` | 反向代理到 Django | `80` | `127.0.0.1:8080` |
 
 访问 API 时建议走 Nginx：
@@ -102,7 +104,8 @@ docker compose up --build -d
 7. 自动执行 `python manage.py migrate`；
 8. 自动执行 `python manage.py collectstatic --noinput`；
 9. Gunicorn 启动 Django；
-10. Nginx 反向代理到 Django。
+10. 启动 Celery Worker 和 Celery Beat；
+11. Nginx 反向代理到 Django。
 
 ### 2.6 查看服务状态
 
@@ -116,6 +119,8 @@ docker compose ps
 mini_ecommerce_mysql    healthy
 mini_ecommerce_redis    healthy
 mini_ecommerce_web      healthy
+mini_ecommerce_celery_worker    running
+mini_ecommerce_celery_beat      running
 mini_ecommerce_nginx    running
 ```
 
@@ -131,6 +136,12 @@ docker compose logs -f
 
 ```powershell
 docker compose logs -f web
+```
+
+只看订单异步任务：
+
+```powershell
+docker compose logs -f celery_worker celery_beat
 ```
 
 只看 MySQL：
@@ -185,6 +196,11 @@ DB_PORT=3306
 REDIS_HOST=redis
 REDIS_PORT=6379
 REDIS_DB=0
+CELERY_BROKER_DB=1
+
+ORDER_PAYMENT_TIMEOUT_SECONDS=1800
+ORDER_TIMEOUT_SWEEP_INTERVAL_SECONDS=60
+ORDER_TIMEOUT_SWEEP_BATCH_SIZE=200
 
 JWT_ACCESS_TOKEN_LIFETIME_MINUTES=60
 JWT_REFRESH_TOKEN_LIFETIME_DAYS=7
@@ -451,13 +467,13 @@ docker compose down -v
 
 这会删除 volume，MySQL 数据会丢失。只有在你要重置数据库时使用。
 
-### 重新构建 web 镜像
+### 重新构建应用镜像
 
 修改 Python 依赖、Dockerfile 或项目代码后：
 
 ```powershell
-docker compose build web
-docker compose up -d web
+docker compose build web celery_worker celery_beat
+docker compose up -d web celery_worker celery_beat
 ```
 
 或者：

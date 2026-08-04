@@ -2,7 +2,7 @@
 
 ## 项目简介
 
-Mini E-Commerce Backend 是一个基于 Django REST Framework 的轻量级电商后端系统，用于展示 Python 后端求职中常见的 API 设计、认证权限、数据库建模、库存一致性、Redis 缓存、Redis 锁和 Docker 部署能力。
+Mini E-Commerce Backend 是一个基于 Django REST Framework 的轻量级电商后端系统，用于展示 Python 后端求职中常见的 API 设计、认证权限、数据库建模、库存一致性、Redis 缓存、Redis 锁、Celery 消息队列和 Docker 部署能力。
 
 项目只提供后端 API，不包含前端页面。核心业务链路为：用户注册登录、浏览商品、加入购物车、从购物车创建订单、扣减库存、模拟支付、取消待支付订单并恢复库存。
 
@@ -14,6 +14,7 @@ Mini E-Commerce Backend 是一个基于 Django REST Framework 的轻量级电商
 - djangorestframework-simplejwt
 - MySQL 8.0
 - Redis 7
+- Celery 5.6
 - Gunicorn
 - Nginx
 - Docker Compose
@@ -33,15 +34,17 @@ Mini E-Commerce Backend 是一个基于 Django REST Framework 的轻量级电商
 - 订单创建时使用 Redis 锁防止重复提交
 - 模拟支付订单
 - 取消待支付订单并恢复库存
-- Docker Compose 启动 Django、MySQL、Redis、Nginx
+- Celery 自动取消超时未支付订单，并通过定时扫描补偿丢失消息
+- Docker Compose 启动 Django、MySQL、Redis、Celery Worker、Celery Beat、Nginx
 
 ## 项目亮点
 
 1. 使用 Django REST Framework 设计 RESTful API，完成用户、商品、购物车、订单核心业务链路。
 2. 订单创建过程使用 `transaction.atomic` 与 `select_for_update` 实现库存扣减一致性，避免并发下单导致超卖。
 3. 使用 Redis 缓存商品详情数据，降低数据库查询压力。
-4. 使用 Redis 锁限制订单重复提交，提升接口幂等性与稳定性。
-5. 使用 Docker Compose 编排 Django、MySQL、Redis、Nginx，实现项目一键部署。
+4. 使用 Redis 用户级短锁拦截短时间重复提交，降低重复创建订单的概率。
+5. 订单提交后发送 Celery ETA 消息，消费者在事务中锁定订单并幂等取消；Celery Beat 定时补偿 MQ 故障期间的漏投订单。
+6. 使用 Docker Compose 编排 Django、MySQL、Redis、Celery Worker、Celery Beat、Nginx，实现项目一键部署。
 
 ## 数据库模型说明
 
@@ -122,6 +125,15 @@ python manage.py migrate
 python manage.py runserver
 ```
 
+另开两个 PowerShell 终端启动异步消费者和补偿调度器：
+
+```powershell
+celery -A config worker --loglevel=info --pool=solo
+celery -A config beat --loglevel=info
+```
+
+Windows 本地 Worker 使用 `--pool=solo`；Docker 中运行在 Linux 容器内，使用 Compose 已配置的并发 Worker。
+
 健康检查：
 
 ```powershell
@@ -153,7 +165,10 @@ docker compose down
 
 本项目默认将 Nginx 映射到本机 `8080`，避免 Windows 上常见的 80 端口占用或保留问题。
 
-完整 Docker 操作流程、端口冲突处理和 Compose 配置解释见 [docs/docker.md](docs/docker.md)。
+完整 Docker 操作流程、端口冲突处理和 Compose 配置解释见 [docs/docker.md](docs/docker.md)。订单超时取消资料分为：
+
+- [消息队列入门设计文档](docs/order_timeout_mq_design.md)：概念、设计流程、关键代码和并发边界。
+- [订单超时运行文档](docs/order_timeout.md)：配置、启动、观察和故障处理。
 
 ## 测试账号
 
@@ -193,7 +208,7 @@ python manage.py test
 
 ## 面试讲解
 
-这个项目重点讲两个问题：库存一致性和接口防重复提交。创建订单时，服务层在 `transaction.atomic()` 中使用 `select_for_update()` 锁定商品行，检查库存后扣减库存、创建订单和订单明细，任何一步失败都会回滚。为了防止用户重复点击提交订单，创建订单前使用 Redis `cache.add()` 加用户级短期锁，处理完成后在 `finally` 中释放锁。
+这个项目重点讲三个问题：库存一致性、接口防重复提交和订单超时释放库存。创建订单时，服务层在 `transaction.atomic()` 中使用 `select_for_update()` 锁定商品行，检查库存后扣减库存、创建订单和订单明细，任何一步失败都会回滚。为了拦截用户重复点击，创建订单前使用 Redis `cache.add()` 加用户级短期锁。待支付订单在事务提交后发送 Celery ETA 消息；任务到期后再次锁定订单并重检状态，只有仍为 `pending` 且超过 `expires_at` 才取消并恢复库存，Celery Beat 负责漏消息补偿。
 
 完整讲解稿和常见面试问题见 [docs/interview.md](docs/interview.md)。
 
@@ -204,6 +219,5 @@ python manage.py test
 - 操作日志表
 - 优惠券和订单金额计算
 - 支付回调和支付流水表
-- 定时取消超时未支付订单
 - 商品列表缓存和热门商品缓存
 - CI 测试流水线

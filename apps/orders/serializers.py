@@ -30,6 +30,7 @@ class OrderListSerializer(serializers.ModelSerializer):
             "status",
             "remark",
             "created_at",
+            "expires_at",
             "paid_at",
             "cancelled_at",
         )
@@ -50,6 +51,7 @@ class OrderDetailSerializer(serializers.ModelSerializer):
             "remark",
             "items",
             "created_at",
+            "expires_at",
             "paid_at",
             "cancelled_at",
             "updated_at",

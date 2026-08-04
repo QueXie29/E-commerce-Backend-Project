@@ -1,3 +1,23 @@
+x-app-environment: &app-environment
+  DEBUG: ${DEBUG:-True}
+  SECRET_KEY: ${SECRET_KEY:-dev-secret-key-change-me-32-characters-minimum}
+  ALLOWED_HOSTS: ${ALLOWED_HOSTS:-127.0.0.1,localhost,web,nginx}
+  CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:-http://127.0.0.1:8080,http://localhost:8080}
+  DB_NAME: ${DB_NAME:-mini_ecommerce}
+  DB_USER: ${DB_USER:-mini_ecommerce_user}
+  DB_PASSWORD: ${DB_PASSWORD:-mini_ecommerce_password}
+  DB_HOST: mysql
+  DB_PORT: 3306
+  REDIS_HOST: redis
+  REDIS_PORT: 6379
+  REDIS_DB: ${REDIS_DB:-0}
+  CELERY_BROKER_DB: ${CELERY_BROKER_DB:-1}
+  ORDER_PAYMENT_TIMEOUT_SECONDS: ${ORDER_PAYMENT_TIMEOUT_SECONDS:-1800}
+  ORDER_TIMEOUT_SWEEP_INTERVAL_SECONDS: ${ORDER_TIMEOUT_SWEEP_INTERVAL_SECONDS:-60}
+  ORDER_TIMEOUT_SWEEP_BATCH_SIZE: ${ORDER_TIMEOUT_SWEEP_BATCH_SIZE:-200}
+  JWT_ACCESS_TOKEN_LIFETIME_MINUTES: ${JWT_ACCESS_TOKEN_LIFETIME_MINUTES:-60}
+  JWT_REFRESH_TOKEN_LIFETIME_DAYS: ${JWT_REFRESH_TOKEN_LIFETIME_DAYS:-7}
+
 services:
   mysql:
     image: mysql:8.0
@@ -41,21 +61,7 @@ services:
     build: .
     container_name: mini_ecommerce_web
     restart: unless-stopped
-    environment:
-      DEBUG: ${DEBUG:-True}
-      SECRET_KEY: ${SECRET_KEY:-dev-secret-key-change-me-32-characters-minimum}
-      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-127.0.0.1,localhost,web,nginx}
-      CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:-http://127.0.0.1:8080,http://localhost:8080}
-      DB_NAME: ${DB_NAME:-mini_ecommerce}
-      DB_USER: ${DB_USER:-mini_ecommerce_user}
-      DB_PASSWORD: ${DB_PASSWORD:-mini_ecommerce_password}
-      DB_HOST: mysql
-      DB_PORT: 3306
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      REDIS_DB: ${REDIS_DB:-0}
-      JWT_ACCESS_TOKEN_LIFETIME_MINUTES: ${JWT_ACCESS_TOKEN_LIFETIME_MINUTES:-60}
-      JWT_REFRESH_TOKEN_LIFETIME_DAYS: ${JWT_REFRESH_TOKEN_LIFETIME_DAYS:-7}
+    environment: *app-environment
     depends_on:
       mysql:
         condition: service_healthy
@@ -76,6 +82,44 @@ services:
       timeout: 5s
       retries: 10
       start_period: 30s
+
+  celery_worker:
+    build: .
+    container_name: mini_ecommerce_celery_worker
+    restart: unless-stopped
+    user: "65534:65534"
+    command: ["celery", "-A", "config", "worker", "--loglevel=info", "--concurrency=2"]
+    environment:
+      <<: *app-environment
+      SKIP_DJANGO_SETUP: "true"
+    depends_on:
+      web:
+        condition: service_healthy
+    volumes:
+      - .:/app
+
+  celery_beat:
+    build: .
+    container_name: mini_ecommerce_celery_beat
+    restart: unless-stopped
+    user: "65534:65534"
+    command:
+      [
+        "celery",
+        "-A",
+        "config",
+        "beat",
+        "--loglevel=info",
+        "--schedule=/tmp/celerybeat-schedule",
+      ]
+    environment:
+      <<: *app-environment
+      SKIP_DJANGO_SETUP: "true"
+    depends_on:
+      web:
+        condition: service_healthy
+    volumes:
+      - .:/app
 
   nginx:
     image: nginx:1.27-alpine

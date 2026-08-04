@@ -26,12 +26,19 @@ class OrderAdmin(admin.ModelAdmin):
         "total_amount",
         "status",
         "created_at",
+        "expires_at",
         "paid_at",
         "cancelled_at",
     )
     list_filter = ("status",)
     search_fields = ("order_no", "user__username")
-    readonly_fields = ("order_no", "total_amount", "created_at", "updated_at")
+    readonly_fields = (
+        "order_no",
+        "total_amount",
+        "created_at",
+        "expires_at",
+        "updated_at",
+    )
     inlines = (OrderItemInline,)
 
 

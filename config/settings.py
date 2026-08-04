@@ -142,11 +142,42 @@ REST_FRAMEWORK = {
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = os.getenv("REDIS_PORT", "6379")
 REDIS_DB = os.getenv("REDIS_DB", "0")
+CELERY_BROKER_DB = os.getenv("CELERY_BROKER_DB", "1")
 
 CACHES = {
     "default": {
         "BACKEND": "django.core.cache.backends.redis.RedisCache",
         "LOCATION": f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}",
+    }
+}
+
+ORDER_PAYMENT_TIMEOUT_SECONDS = int(
+    os.getenv("ORDER_PAYMENT_TIMEOUT_SECONDS", "1800")
+)
+ORDER_TIMEOUT_SWEEP_INTERVAL_SECONDS = int(
+    os.getenv("ORDER_TIMEOUT_SWEEP_INTERVAL_SECONDS", "60")
+)
+ORDER_TIMEOUT_SWEEP_BATCH_SIZE = int(
+    os.getenv("ORDER_TIMEOUT_SWEEP_BATCH_SIZE", "200")
+)
+
+CELERY_BROKER_URL = os.getenv(
+    "CELERY_BROKER_URL",
+    f"redis://{REDIS_HOST}:{REDIS_PORT}/{CELERY_BROKER_DB}",
+)
+CELERY_ACCEPT_CONTENT = ("json",)
+CELERY_TASK_SERIALIZER = "json"
+CELERY_TASK_IGNORE_RESULT = True
+CELERY_TIMEZONE = TIME_ZONE
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+CELERY_BROKER_TRANSPORT_OPTIONS = {
+    "visibility_timeout": max(3600, ORDER_PAYMENT_TIMEOUT_SECONDS + 600),
+}
+CELERY_BEAT_SCHEDULE = {
+    "dispatch-expired-orders": {
+        "task": "apps.orders.tasks.dispatch_expired_orders",
+        "schedule": ORDER_TIMEOUT_SWEEP_INTERVAL_SECONDS,
+        "options": {"expires": ORDER_TIMEOUT_SWEEP_INTERVAL_SECONDS},
     }
 }
 
@@ -175,3 +206,5 @@ if "test" in sys.argv:
     PASSWORD_HASHERS = [
         "django.contrib.auth.hashers.MD5PasswordHasher",
     ]
+    CELERY_TASK_ALWAYS_EAGER = True
+    CELERY_TASK_EAGER_PROPAGATES = True
