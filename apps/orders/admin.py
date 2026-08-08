@@ -31,9 +31,11 @@ class OrderAdmin(admin.ModelAdmin):
         "cancelled_at",
     )
     list_filter = ("status",)
-    search_fields = ("order_no", "user__username")
+    search_fields = ("order_no", "idempotency_key", "user__username")
     readonly_fields = (
         "order_no",
+        "idempotency_key",
+        "request_hash",
         "total_amount",
         "created_at",
         "expires_at",

@@ -879,6 +879,7 @@ Authorization: Bearer <access_token>
 ```http
 POST /api/orders/
 Authorization: Bearer <access_token>
+Idempotency-Key: <1-64 chars unique key>
 ```
 
 请求体：
@@ -897,10 +898,13 @@ Authorization: Bearer <access_token>
 4. 库存必须充足；
 5. 创建订单和扣减库存必须在同一个数据库事务中完成；
 6. 使用 `select_for_update()` 锁定商品行，避免并发超卖；
-7. 使用 Redis 锁防止用户重复点击提交订单；
-8. 创建成功后清除对应购物车项；
-9. 订单金额以数据库当前商品价格为准；
-10. 订单明细保存商品名称和价格快照。
+7. 在订单中保存 `idempotency_key` 和规范化请求摘要；
+8. 使用 `(user_id, idempotency_key)` 数据库唯一约束保证成功订单身份唯一；
+9. 相同 key、相同请求返回同一个订单，相同 key、不同请求返回 `40901`；
+10. 使用 Redis 锁快速拦截用户并发提交，但 Redis 不是最终幂等保证；
+11. 创建成功后清除对应购物车项；
+12. 订单金额以数据库当前商品价格为准；
+13. 订单明细保存商品名称和价格快照。
 
 Redis 锁建议：
 
@@ -929,7 +933,13 @@ cache.add(lock_key, lock_value, timeout=10)
 伪代码：
 
 ```python
-def create_order_from_cart(user, remark):
+def create_order_from_cart(user, idempotency_key, remark):
+    request_hash = make_order_request_hash(remark)
+    existing = find_order(user, idempotency_key)
+    if existing:
+        ensure_same_request(existing, request_hash)
+        return existing
+
     lock_key = f"lock:order:create:user:{user.id}"
     lock_value = str(uuid.uuid4())
 
@@ -946,7 +956,11 @@ def create_order_from_cart(user, remark):
             if not cart_items.exists():
                 raise BusinessException("购物车为空", code=40003)
 
-            order = Order.objects.create(...)
+            order = Order.objects.create(
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+                ...
+            )
 
             for item in cart_items:
                 product = Product.objects.select_for_update().get(id=item.product_id)
@@ -971,6 +985,8 @@ def create_order_from_cart(user, remark):
         if cache.get(lock_key) == lock_value:
             cache.delete(lock_key)
 ```
+
+真实实现还需要捕获唯一约束竞争产生的 `IntegrityError`：事务完整回滚后重新按 `(user_id, idempotency_key)` 查询；请求摘要相同则返回已经提交的订单，不同则返回 `40901`。不能在已经标记为回滚的事务内部继续查询。
 
 #### 订单列表
 
@@ -1780,4 +1796,3 @@ docker compose up --build
 - Django REST Framework 官方文档：https://www.django-rest-framework.org/
 - Simple JWT 官方文档：https://django-rest-framework-simplejwt.readthedocs.io/
 - Docker 官方文档：https://docs.docker.com/
-

@@ -56,16 +56,23 @@ class OrderViewSet(viewsets.GenericViewSet):
         return api_response(data=OrderDetailSerializer(order).data)
 
     def create(self, request):
-        serializer = OrderCreateSerializer(data=request.data)
+        serializer = OrderCreateSerializer(
+            data=request.data,
+            context={"request": request},
+        )
         serializer.is_valid(raise_exception=True)
-        order = create_order_from_cart(
+        result = create_order_from_cart(
             user=request.user,
+            idempotency_key=serializer.validated_data["idempotency_key"],
             remark=serializer.validated_data.get("remark", ""),
         )
-        return api_response(
-            data=OrderDetailSerializer(order).data,
+        response = api_response(
+            data=OrderDetailSerializer(result.order).data,
             status=status.HTTP_201_CREATED,
         )
+        if result.replayed:
+            response["Idempotency-Replayed"] = "true"
+        return response
 
     @action(detail=True, methods=["post"])
     def pay(self, request, pk=None):

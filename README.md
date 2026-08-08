@@ -98,6 +98,8 @@ Mini E-Commerce Backend 是一个基于 Django REST Framework 的轻量级电商
 - `POST /api/orders/{id}/pay/`
 - `POST /api/orders/{id}/cancel/`
 
+创建订单必须携带 `Idempotency-Key` 请求头；同一用户复用相同 key 和相同请求内容时会返回同一个订单，不会再次扣减库存。
+
 详细请求和响应见 [docs/api.md](docs/api.md)。
 
 ## 本地启动方式

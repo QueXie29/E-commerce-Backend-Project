@@ -11,6 +11,8 @@ class Order(models.Model):
         CANCELLED = "cancelled", "已取消"
 
     order_no = models.CharField(max_length=40, unique=True)
+    idempotency_key = models.CharField(max_length=64, null=True, blank=True)
+    request_hash = models.CharField(max_length=64, null=True, blank=True)
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         related_name="orders",
@@ -41,6 +43,12 @@ class Order(models.Model):
                 fields=["status", "expires_at"],
                 name="idx_order_status_expires",
             ),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "idempotency_key"],
+                name="uq_order_user_idem_key",
+            )
         ]
 
     def __str__(self) -> str:

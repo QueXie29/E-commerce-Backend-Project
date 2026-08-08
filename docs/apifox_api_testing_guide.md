@@ -95,6 +95,7 @@
 | `40300` | 无权限 | 普通用户调用管理员接口 |
 | `40400` | 资源不存在 | ID 不存在或普通用户访问他人资源 |
 | `40900` | 重复提交 | 订单创建锁已被占用 |
+| `40901` | 幂等键冲突 | 相同 `Idempotency-Key` 被用于不同订单请求内容 |
 | `50000` | 未单独映射的服务端/HTTP 异常 | 当前异常处理器处理 HTTP `405` 时可能出现 |
 
 ## 2. 启动项目并确认服务可用
@@ -1219,6 +1220,8 @@ Authorization: Bearer {{user_access}}
 - 删除已下单的购物车项；
 - 订单初始状态为 `pending`。
 
+所有 `POST /api/orders/` 请求都必须携带 `Idempotency-Key`。每笔新订单使用不同 key；只有重试同一次请求时才复用原 key。
+
 本节创建三笔普通用户订单：
 
 1. 第一笔支付，保存为 `paid_order_id`。
@@ -1253,6 +1256,7 @@ Content-Type: application/json
 POST {{base_url}}/api/orders/
 Authorization: Bearer {{user_access}}
 Content-Type: application/json
+Idempotency-Key: apifox-user-paid-order-001
 ```
 
 ```json
@@ -1380,6 +1384,7 @@ Content-Type: application/json
 POST {{base_url}}/api/orders/
 Authorization: Bearer {{user_access}}
 Content-Type: application/json
+Idempotency-Key: apifox-user-cancelled-order-001
 ```
 
 ```json
@@ -1439,7 +1444,16 @@ Authorization: Bearer {{user_access}}
 }
 ```
 
-创建订单请求体：
+创建订单：
+
+```http
+POST {{base_url}}/api/orders/
+Authorization: Bearer {{user_access}}
+Content-Type: application/json
+Idempotency-Key: apifox-user-pending-order-001
+```
+
+请求体：
 
 ```json
 {
@@ -1521,6 +1535,7 @@ GET {{base_url}}/api/orders/?status=finished
 POST {{base_url}}/api/orders/
 Authorization: Bearer {{user_access}}
 Content-Type: application/json
+Idempotency-Key: apifox-empty-cart-001
 ```
 
 ```json
@@ -1529,7 +1544,33 @@ Content-Type: application/json
 
 预期：HTTP `400`、业务码 `40003`、提示“购物车为空”。
 
-### 9.11 可选：验证订单重复提交锁
+### 9.11 验证数据库幂等重放
+
+购物车虽然已经为空，但使用第三笔订单完全相同的 key 和请求体再次提交：
+
+```http
+POST {{base_url}}/api/orders/
+Authorization: Bearer {{user_access}}
+Content-Type: application/json
+Idempotency-Key: apifox-user-pending-order-001
+```
+
+```json
+{
+  "remark": "Apifox 第三笔订单：保持待支付"
+}
+```
+
+预期：
+
+- HTTP `201 Created`。
+- 响应头 `Idempotency-Replayed=true`。
+- 返回的订单 ID 与 `pending_order_id` 相同。
+- 不再次扣减库存，不创建第二张订单。
+
+把 `remark` 改成其他内容但继续使用这个 key，预期 HTTP `409`、业务码 `40901`。
+
+### 9.12 可选：验证订单重复提交锁
 
 手动连续点击两次“创建订单”不一定稳定复现锁冲突，因为第一次请求可能很快完成并释放锁。Docker 环境下可以临时预置 Redis 锁：
 
@@ -1548,6 +1589,12 @@ OK
 ```
 
 4. 在 30 秒内调用 `POST /api/orders/`。
+
+请求需要携带一个尚未使用的幂等键，例如：
+
+```http
+Idempotency-Key: apifox-lock-check-001
+```
 
 预期：HTTP `409 Conflict`、业务码 `40900`、提示“订单正在处理中，请勿重复提交”，购物车项仍然存在。
 
@@ -1609,6 +1656,7 @@ Content-Type: application/json
 POST {{base_url}}/api/orders/
 Authorization: Bearer {{admin_access}}
 Content-Type: application/json
+Idempotency-Key: apifox-admin-order-001
 ```
 
 ```json
@@ -1798,15 +1846,16 @@ GET {{base_url}}/api/categories/{{category_id}}/
 26. 添加商品并创建第三笔订单，提取 `pending_order_id`，保持待支付。
 27. 测试订单列表、详情和三个状态筛选。
 28. 测试购物车为空创建订单。
-29. 可选测试 Redis 重复提交锁。
-30. 管理员查看所有订单和普通用户订单详情。
-31. 管理员创建自己的订单并提取 `admin_order_id`。
-32. 普通用户验证无法查看管理员订单。
-33. 对待支付订单发送 PUT、PATCH、DELETE，验证 HTTP `405`。
-34. 管理员软删除商品。
-35. 验证普通用户看不到下架商品且不能加入购物车。
-36. 管理员软删除分类。
-37. 验证公开分类接口看不到停用分类。
+29. 复用第三笔订单 key，验证数据库幂等重放和内容冲突。
+30. 可选测试 Redis 重复提交锁。
+31. 管理员查看所有订单和普通用户订单详情。
+32. 管理员创建自己的订单并提取 `admin_order_id`。
+33. 普通用户验证无法查看管理员订单。
+34. 对待支付订单发送 PUT、PATCH、DELETE，验证 HTTP `405`。
+35. 管理员软删除商品。
+36. 验证普通用户看不到下架商品且不能加入购物车。
+37. 管理员软删除分类。
+38. 验证公开分类接口看不到停用分类。
 
 ## 13. 角色权限矩阵
 

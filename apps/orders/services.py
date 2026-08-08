@@ -1,13 +1,16 @@
-import uuid
+import hashlib
+import json
 import logging
+import uuid
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
 from functools import partial
 
 from django.conf import settings
 from django.core.cache import cache
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 
@@ -21,7 +24,7 @@ from apps.products.services import invalidate_product_caches
 
 logger = logging.getLogger(__name__)
 
-#防重复提交锁
+# 防重复提交锁
 ORDER_CREATE_LOCK_KEY = "lock:order:create:user:{user_id}"
 ORDER_CREATE_LOCK_TTL = 10
 
@@ -30,18 +33,82 @@ ORDER_EXPIRY_NOT_DUE = "not_due"
 ORDER_EXPIRY_ALREADY_FINAL = "already_final"
 ORDER_EXPIRY_MISSING = "missing"
 
-#EC + 时间戳 + 随机后缀   EC-20260718153045123456-A8F31C9D
+ORDER_IDEMPOTENCY_CONFLICT_CODE = 40901
+
+
+@dataclass(frozen=True)
+class OrderCreationResult:
+    order: Order
+    replayed: bool
+
+
+# EC + 时间戳 + 随机后缀   EC-20260718153045123456-A8F31C9D
 def generate_order_no() -> str:
     timestamp = timezone.now().strftime("%Y%m%d%H%M%S%f")
     suffix = uuid.uuid4().hex[:8].upper()
     return f"EC{timestamp}{suffix}"
 
 
-def create_order_from_cart(user, remark: str = "") -> Order:
+def _make_order_request_hash(remark: str) -> str:
+    payload = json.dumps(
+        {"remark": remark, "version": 1},
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _get_idempotent_order_result(
+    user,
+    idempotency_key: str,
+    request_hash: str,
+) -> OrderCreationResult | None:
+    try:
+        existing_order = Order.objects.only("id", "request_hash").get(
+            user=user,
+            idempotency_key=idempotency_key,
+        )
+    except Order.DoesNotExist:
+        return None
+    if existing_order.request_hash != request_hash:
+        raise BusinessException(
+            "Idempotency-Key 已用于其他订单请求",
+            code=ORDER_IDEMPOTENCY_CONFLICT_CODE,
+            status_code=409,
+        )
+    return OrderCreationResult(
+        order=get_order_for_response(existing_order.id),
+        replayed=True,
+    )
+
+
+def create_order_from_cart(
+    user,
+    idempotency_key: str,
+    remark: str = "",
+) -> OrderCreationResult:
+    normalized_remark = remark or ""
+    request_hash = _make_order_request_hash(normalized_remark)
+    existing_result = _get_idempotent_order_result(
+        user,
+        idempotency_key,
+        request_hash,
+    )
+    if existing_result is not None:
+        return existing_result
+
     lock_key = ORDER_CREATE_LOCK_KEY.format(user_id=user.id)
     lock_value = uuid.uuid4().hex
 
     if not cache.add(lock_key, lock_value, timeout=ORDER_CREATE_LOCK_TTL):
+        existing_result = _get_idempotent_order_result(
+            user,
+            idempotency_key,
+            request_hash,
+        )
+        if existing_result is not None:
+            return existing_result
         raise BusinessException(
             "订单正在处理中，请勿重复提交",
             code=40900,
@@ -49,88 +116,122 @@ def create_order_from_cart(user, remark: str = "") -> Order:
         )
 
     try:
-        with transaction.atomic():
-            #list() 会立即执行 SQL，并把结果转换成普通 Python 列表
-            cart_items = list(
-                CartItem.objects.select_related("product", "product__category")
-                .filter(user=user, selected=True)
-                .order_by("id")
-            )
-            if not cart_items:
-                raise BusinessException("购物车为空", code=40003)
+        existing_result = _get_idempotent_order_result(
+            user,
+            idempotency_key,
+            request_hash,
+        )
+        if existing_result is not None:
+            return existing_result
 
-            product_ids = [item.product_id for item in cart_items]
-            products = (
-                Product.objects.select_for_update()
-                .select_related("category")
-                .filter(id__in=product_ids)
-            )
-            product_map = {product.id: product for product in products}
-            affected_product_ids = tuple(sorted(product_map))
+        try:
+            with transaction.atomic():
+                #list() 会立即执行 SQL，并把结果转换成普通 Python 列表
+                cart_items = list(
+                    CartItem.objects.select_related("product", "product__category")
+                    .filter(user=user, selected=True)
+                    .order_by("id")
+                )
+                if not cart_items:
+                    raise BusinessException("购物车为空", code=40003)
 
-            order = Order.objects.create(
-                order_no=generate_order_no(),
-                user=user,
-                total_amount=Decimal("0.00"),
-                status=Order.Status.PENDING,
-                remark=remark or "",
-                expires_at=timezone.now()
-                + timedelta(seconds=settings.ORDER_PAYMENT_TIMEOUT_SECONDS),
-            )
+                product_ids = [item.product_id for item in cart_items]
+                products = (
+                    Product.objects.select_for_update()
+                    .select_related("category")
+                    .filter(id__in=product_ids)
+                )
+                product_map = {product.id: product for product in products}
+                affected_product_ids = tuple(sorted(product_map))
 
-            total_amount = Decimal("0.00")
-            order_items = []
-
-            for cart_item in cart_items:
-                product = product_map.get(cart_item.product_id)
-                if product is None:
-                    raise BusinessException("商品不存在", code=40400, status_code=404)
-
-                if product.status != Product.Status.ACTIVE or not product.category.is_active:
-                    raise BusinessException("商品已下架", code=40002)
-
-                if product.stock < cart_item.quantity:
-                    raise BusinessException(
-                        "商品库存不足",
-                        code=40001,
-                        data={
-                            "product_id": product.id,
-                            "product_name": product.name,
-                            "stock": product.stock,
-                            "requested_quantity": cart_item.quantity,
-                        },
-                    )
-
-                subtotal = product.price * cart_item.quantity
-                total_amount += subtotal
-
-                product.stock -= cart_item.quantity
-                product.sales_count += cart_item.quantity
-                product.save(update_fields=["stock", "sales_count", "updated_at"])
-
-                order_items.append(
-                    OrderItem(
-                        order=order,
-                        product=product,
-                        product_name=product.name,
-                        product_price=product.price,
-                        quantity=cart_item.quantity,
-                        subtotal=subtotal,
-                    )
+                order = Order.objects.create(
+                    order_no=generate_order_no(),
+                    idempotency_key=idempotency_key,
+                    request_hash=request_hash,
+                    user=user,
+                    total_amount=Decimal("0.00"),
+                    status=Order.Status.PENDING,
+                    remark=normalized_remark,
+                    expires_at=timezone.now()
+                    + timedelta(seconds=settings.ORDER_PAYMENT_TIMEOUT_SECONDS),
                 )
 
-            OrderItem.objects.bulk_create(order_items)
-            order.total_amount = total_amount
-            order.save(update_fields=["total_amount", "updated_at"])
-            CartItem.objects.filter(id__in=[item.id for item in cart_items]).delete()
-            transaction.on_commit(
-                partial(invalidate_product_caches, affected_product_ids)
-            )
-            transaction.on_commit(
-                partial(schedule_order_timeout, order.id, order.expires_at)
-            )
+                total_amount = Decimal("0.00")
+                order_items = []
 
-            return get_order_for_response(order.id)
+                for cart_item in cart_items:
+                    product = product_map.get(cart_item.product_id)
+                    if product is None:
+                        raise BusinessException(
+                            "商品不存在",
+                            code=40400,
+                            status_code=404,
+                        )
+
+                    if (
+                        product.status != Product.Status.ACTIVE
+                        or not product.category.is_active
+                    ):
+                        raise BusinessException("商品已下架", code=40002)
+
+                    if product.stock < cart_item.quantity:
+                        raise BusinessException(
+                            "商品库存不足",
+                            code=40001,
+                            data={
+                                "product_id": product.id,
+                                "product_name": product.name,
+                                "stock": product.stock,
+                                "requested_quantity": cart_item.quantity,
+                            },
+                        )
+
+                    subtotal = product.price * cart_item.quantity
+                    total_amount += subtotal
+
+                    product.stock -= cart_item.quantity
+                    product.sales_count += cart_item.quantity
+                    product.save(
+                        update_fields=["stock", "sales_count", "updated_at"]
+                    )
+
+                    order_items.append(
+                        OrderItem(
+                            order=order,
+                            product=product,
+                            product_name=product.name,
+                            product_price=product.price,
+                            quantity=cart_item.quantity,
+                            subtotal=subtotal,
+                        )
+                    )
+
+                OrderItem.objects.bulk_create(order_items)
+                order.total_amount = total_amount
+                order.save(update_fields=["total_amount", "updated_at"])
+                CartItem.objects.filter(
+                    id__in=[item.id for item in cart_items]
+                ).delete()
+                transaction.on_commit(
+                    partial(invalidate_product_caches, affected_product_ids)
+                )
+                transaction.on_commit(
+                    partial(schedule_order_timeout, order.id, order.expires_at)
+                )
+
+                return OrderCreationResult(
+                    order=get_order_for_response(order.id),
+                    replayed=False,
+                )
+        except IntegrityError:
+            existing_result = _get_idempotent_order_result(
+                user,
+                idempotency_key,
+                request_hash,
+            )
+            if existing_result is not None:
+                return existing_result
+            raise
     finally:
         release_order_create_lock(lock_key, lock_value)
 

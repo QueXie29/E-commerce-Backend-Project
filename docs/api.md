@@ -52,6 +52,7 @@
 | 40300 | 无权限 |
 | 40400 | 资源不存在 |
 | 40900 | 重复提交 |
+| 40901 | Idempotency-Key 请求内容冲突 |
 | 50000 | 服务器内部错误 |
 
 ## 认证
@@ -236,6 +237,14 @@ DELETE /api/admin/products/{id}/
 
 `POST /api/orders/`
 
+请求头必须携带一个新的订单提交幂等键：
+
+```http
+Idempotency-Key: 0d17cd55-4904-4ef2-b4a9-cce6e2066a12
+```
+
+幂等键长度为 1～64 个字符，只能包含字母、数字、点、下划线、冒号和短横线；服务端会统一转换为小写，避免 MySQL 与 SQLite 的大小写比较规则不同。每次新的下单意图使用新 key；网络超时或响应丢失后的同一次重试必须复用原 key。
+
 ```json
 {
   "remark": "请尽快发货"
@@ -245,6 +254,8 @@ DELETE /api/admin/products/{id}/
 创建订单只购买购物车中 `selected=true` 的商品。服务层会：
 
 - 使用 Redis 用户级锁防止重复提交
+- 在订单表保存 `idempotency_key` 和请求摘要
+- 使用 `(user_id, idempotency_key)` 数据库唯一约束保证成功订单身份唯一
 - 使用数据库事务包裹订单创建
 - 使用 `select_for_update()` 锁定商品行
 - 检查商品状态和库存
@@ -254,7 +265,23 @@ DELETE /api/admin/products/{id}/
 - 写入固定的支付截止时间 `expires_at`
 - 数据库提交后发送 Celery 超时任务
 
-重复提交响应：
+相同用户使用同一 key 和相同请求体重试时，接口返回同一个订单 ID，并增加响应头：
+
+```http
+Idempotency-Replayed: true
+```
+
+相同 key 对应不同 `remark` 时返回：
+
+```json
+{
+  "code": 40901,
+  "message": "Idempotency-Key 已用于其他订单请求",
+  "data": null
+}
+```
+
+请求仍在处理且 Redis 用户级锁被占用时返回：
 
 ```json
 {

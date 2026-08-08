@@ -1,9 +1,11 @@
-from decimal import Decimal
+import uuid
 from datetime import timedelta
+from decimal import Decimal
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
+from django.db import IntegrityError, transaction
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APITestCase
@@ -44,13 +46,20 @@ class OrderApiTests(APITestCase):
         )
         self.client.force_authenticate(self.user)
 
+    def post_order(self, data=None, idempotency_key=None):
+        return self.client.post(
+            reverse("order-list"),
+            data or {},
+            format="json",
+            HTTP_IDEMPOTENCY_KEY=idempotency_key or uuid.uuid4().hex,
+        )
+
     def test_create_order_from_cart_deducts_stock_and_clears_cart(self):
         CartItem.objects.create(user=self.user, product=self.product, quantity=2)
 
-        response = self.client.post(
-            reverse("order-list"),
+        response = self.post_order(
             {"remark": "请尽快发货"},
-            format="json",
+            idempotency_key="create-order-success",
         )
 
         self.assertEqual(response.status_code, 201)
@@ -63,17 +72,129 @@ class OrderApiTests(APITestCase):
         self.assertFalse(CartItem.objects.filter(user=self.user).exists())
 
         order = Order.objects.get(user=self.user)
+        self.assertEqual(order.idempotency_key, "create-order-success")
+        self.assertEqual(len(order.request_hash), 64)
         self.assertEqual(order.status, Order.Status.PENDING)
         self.assertGreater(order.expires_at, order.created_at)
         self.assertEqual(order.items.count(), 1)
         self.assertEqual(order.items.first().product_name, "Sony Camera")
+
+    def test_order_create_requires_idempotency_key(self):
+        CartItem.objects.create(user=self.user, product=self.product, quantity=1)
+
+        response = self.client.post(reverse("order-list"), {}, format="json")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["code"], 40000)
+        self.assertIn("Idempotency-Key", response.data["data"])
+        self.assertFalse(Order.objects.exists())
+        self.assertTrue(CartItem.objects.filter(user=self.user).exists())
+
+    def test_order_create_rejects_invalid_idempotency_key(self):
+        CartItem.objects.create(user=self.user, product=self.product, quantity=1)
+
+        response = self.client.post(
+            reverse("order-list"),
+            {},
+            format="json",
+            HTTP_IDEMPOTENCY_KEY="invalid key with spaces",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["code"], 40000)
+        self.assertFalse(Order.objects.exists())
+
+    def test_same_idempotency_key_replays_original_order(self):
+        CartItem.objects.create(user=self.user, product=self.product, quantity=2)
+        idempotency_key = "Replay-Order-Request"
+
+        first_response = self.post_order(
+            {"remark": "幂等重放"},
+            idempotency_key=idempotency_key,
+        )
+        cache.add(
+            ORDER_CREATE_LOCK_KEY.format(user_id=self.user.id),
+            "another-request",
+            timeout=10,
+        )
+        second_response = self.post_order(
+            {"remark": "幂等重放"},
+            idempotency_key=idempotency_key.lower(),
+        )
+
+        self.assertEqual(first_response.status_code, 201)
+        self.assertEqual(second_response.status_code, 201)
+        self.assertNotIn("Idempotency-Replayed", first_response)
+        self.assertEqual(second_response["Idempotency-Replayed"], "true")
+        self.assertEqual(
+            first_response.data["data"]["id"],
+            second_response.data["data"]["id"],
+        )
+        self.assertEqual(Order.objects.count(), 1)
+        self.assertEqual(
+            Order.objects.get().idempotency_key,
+            idempotency_key.lower(),
+        )
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 3)
+        self.assertEqual(self.product.sales_count, 2)
+
+    def test_same_idempotency_key_with_different_payload_is_rejected(self):
+        CartItem.objects.create(user=self.user, product=self.product, quantity=1)
+        idempotency_key = "conflicting-order-request"
+
+        first_response = self.post_order(
+            {"remark": "第一次请求"},
+            idempotency_key=idempotency_key,
+        )
+        conflict_response = self.post_order(
+            {"remark": "被修改的请求"},
+            idempotency_key=idempotency_key,
+        )
+
+        self.assertEqual(first_response.status_code, 201)
+        self.assertEqual(conflict_response.status_code, 409)
+        self.assertEqual(conflict_response.data["code"], 40901)
+        self.assertEqual(Order.objects.count(), 1)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 4)
+
+    def test_database_enforces_user_scoped_idempotency_key(self):
+        order_values = {
+            "user": self.user,
+            "idempotency_key": "database-unique-key",
+            "request_hash": "a" * 64,
+            "total_amount": Decimal("0.00"),
+            "expires_at": timezone.now() + timedelta(minutes=30),
+        }
+        Order.objects.create(order_no="IDEMPOTENCY-ORDER-1", **order_values)
+
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                Order.objects.create(
+                    order_no="IDEMPOTENCY-ORDER-2",
+                    **order_values,
+                )
+
+        other_user = User.objects.create_user(
+            username="other-buyer",
+            password="Test123456",
+        )
+        Order.objects.create(
+            order_no="IDEMPOTENCY-ORDER-3",
+            **{**order_values, "user": other_user},
+        )
+        self.assertEqual(
+            Order.objects.filter(idempotency_key="database-unique-key").count(),
+            2,
+        )
 
     @patch("apps.orders.tasks.cancel_expired_order.apply_async")
     def test_order_timeout_task_is_published_only_after_commit(self, apply_async):
         CartItem.objects.create(user=self.user, product=self.product, quantity=1)
 
         with self.captureOnCommitCallbacks(execute=False) as callbacks:
-            response = self.client.post(reverse("order-list"), {}, format="json")
+            response = self.post_order()
 
         self.assertEqual(response.status_code, 201)
         self.assertEqual(len(callbacks), 2)
@@ -87,7 +208,7 @@ class OrderApiTests(APITestCase):
     def test_order_create_fails_when_stock_is_insufficient(self):
         CartItem.objects.create(user=self.user, product=self.product, quantity=6)
 
-        response = self.client.post(reverse("order-list"), {}, format="json")
+        response = self.post_order()
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.data["code"], 40001)
@@ -101,7 +222,7 @@ class OrderApiTests(APITestCase):
         cache.add(lock_key, "locked", timeout=10)
         CartItem.objects.create(user=self.user, product=self.product, quantity=1)
 
-        response = self.client.post(reverse("order-list"), {}, format="json")
+        response = self.post_order()
 
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.data["code"], 40900)
@@ -109,7 +230,7 @@ class OrderApiTests(APITestCase):
 
     def test_pay_order_and_paid_order_cannot_be_cancelled(self):
         CartItem.objects.create(user=self.user, product=self.product, quantity=1)
-        create_response = self.client.post(reverse("order-list"), {}, format="json")
+        create_response = self.post_order()
         order_id = create_response.data["data"]["id"]
 
         pay_response = self.client.post(reverse("order-pay", args=[order_id]))
@@ -122,7 +243,7 @@ class OrderApiTests(APITestCase):
 
     def test_cancel_pending_order_restores_stock(self):
         CartItem.objects.create(user=self.user, product=self.product, quantity=2)
-        create_response = self.client.post(reverse("order-list"), {}, format="json")
+        create_response = self.post_order()
         order_id = create_response.data["data"]["id"]
 
         self.product.refresh_from_db()
@@ -162,7 +283,7 @@ class OrderApiTests(APITestCase):
         cache.set_many(stale_details, timeout=300)
 
         with self.captureOnCommitCallbacks(execute=False) as callbacks:
-            response = self.client.post(reverse("order-list"), {}, format="json")
+            response = self.post_order()
 
         self.assertEqual(response.status_code, 201)
         self.assertEqual(len(callbacks), 2)
@@ -179,7 +300,7 @@ class OrderApiTests(APITestCase):
         version_before = get_product_list_cache_version()
 
         with self.captureOnCommitCallbacks(execute=True) as callbacks:
-            response = self.client.post(reverse("order-list"), {}, format="json")
+            response = self.post_order()
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(len(callbacks), 0)
@@ -188,11 +309,7 @@ class OrderApiTests(APITestCase):
     def test_order_cancellation_invalidates_list_cache_once_after_commit(self):
         CartItem.objects.create(user=self.user, product=self.product, quantity=1)
         with self.captureOnCommitCallbacks(execute=True) as create_callbacks:
-            create_response = self.client.post(
-                reverse("order-list"),
-                {},
-                format="json",
-            )
+            create_response = self.post_order()
         order_id = create_response.data["data"]["id"]
         self.assertEqual(len(create_callbacks), 2)
         version_before_cancel = get_product_list_cache_version()
@@ -221,11 +338,7 @@ class OrderApiTests(APITestCase):
     def test_order_payment_does_not_invalidate_list_cache(self):
         CartItem.objects.create(user=self.user, product=self.product, quantity=1)
         with self.captureOnCommitCallbacks(execute=True):
-            create_response = self.client.post(
-                reverse("order-list"),
-                {},
-                format="json",
-            )
+            create_response = self.post_order()
         order_id = create_response.data["data"]["id"]
         version_before_payment = get_product_list_cache_version()
 
@@ -242,11 +355,7 @@ class OrderApiTests(APITestCase):
     def test_timeout_task_cancels_order_once_and_restores_stock_once(self):
         CartItem.objects.create(user=self.user, product=self.product, quantity=2)
         with self.captureOnCommitCallbacks(execute=True):
-            create_response = self.client.post(
-                reverse("order-list"),
-                {},
-                format="json",
-            )
+            create_response = self.post_order()
         order_id = create_response.data["data"]["id"]
         Order.objects.filter(id=order_id).update(
             expires_at=timezone.now() - timedelta(seconds=1)
@@ -268,11 +377,7 @@ class OrderApiTests(APITestCase):
     def test_timeout_task_does_not_cancel_before_deadline(self):
         CartItem.objects.create(user=self.user, product=self.product, quantity=1)
         with self.captureOnCommitCallbacks(execute=True):
-            create_response = self.client.post(
-                reverse("order-list"),
-                {},
-                format="json",
-            )
+            create_response = self.post_order()
         order_id = create_response.data["data"]["id"]
 
         result = cancel_expired_order(order_id)
@@ -286,11 +391,7 @@ class OrderApiTests(APITestCase):
     def test_paid_order_is_ignored_by_timeout_task(self):
         CartItem.objects.create(user=self.user, product=self.product, quantity=1)
         with self.captureOnCommitCallbacks(execute=True):
-            create_response = self.client.post(
-                reverse("order-list"),
-                {},
-                format="json",
-            )
+            create_response = self.post_order()
         order_id = create_response.data["data"]["id"]
         pay_response = self.client.post(reverse("order-pay", args=[order_id]))
 
@@ -308,11 +409,7 @@ class OrderApiTests(APITestCase):
     def test_pay_endpoint_cancels_order_when_deadline_has_passed(self):
         CartItem.objects.create(user=self.user, product=self.product, quantity=1)
         with self.captureOnCommitCallbacks(execute=True):
-            create_response = self.client.post(
-                reverse("order-list"),
-                {},
-                format="json",
-            )
+            create_response = self.post_order()
         order_id = create_response.data["data"]["id"]
         Order.objects.filter(id=order_id).update(
             expires_at=timezone.now() - timedelta(seconds=1)
@@ -335,11 +432,7 @@ class OrderApiTests(APITestCase):
     def test_sweep_dispatches_only_overdue_pending_orders(self, delay):
         CartItem.objects.create(user=self.user, product=self.product, quantity=1)
         with self.captureOnCommitCallbacks(execute=True):
-            create_response = self.client.post(
-                reverse("order-list"),
-                {},
-                format="json",
-            )
+            create_response = self.post_order()
         expired_order_id = create_response.data["data"]["id"]
         Order.objects.filter(id=expired_order_id).update(
             expires_at=timezone.now() - timedelta(seconds=1)

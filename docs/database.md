@@ -105,6 +105,8 @@ products.Product 1 --- N orders.OrderItem
 |---|---|---|
 | id | BigAutoField | 主键 |
 | order_no | CharField | 订单号，唯一 |
+| idempotency_key | CharField | 客户端订单提交身份；历史/非接口订单可为空 |
+| request_hash | CharField | 规范化创建请求的 SHA-256 摘要 |
 | user | ForeignKey | 下单用户 |
 | total_amount | DecimalField | 订单总金额 |
 | status | CharField | `pending/paid/cancelled` |
@@ -114,6 +116,14 @@ products.Product 1 --- N orders.OrderItem
 | paid_at | DateTimeField | 支付时间 |
 | cancelled_at | DateTimeField | 取消时间 |
 | updated_at | DateTimeField | 更新时间 |
+
+订单创建幂等约束：
+
+```text
+UNIQUE(user_id, idempotency_key)
+```
+
+创建接口要求 `Idempotency-Key` 请求头，并在持久化前统一转换为小写，避免 MySQL 默认排序规则与 SQLite 对大小写的判断不同。相同用户、相同 key 和相同请求摘要会返回同一个成功订单；相同 key 对应不同摘要时返回 `40901`。字段允许为空是为了兼容迁移前历史订单以及不经过创建接口的旧数据，MySQL 唯一约束允许存在多条 `NULL`。
 
 状态流转：
 
@@ -163,7 +173,7 @@ with transaction.atomic():
 
 - `transaction.atomic()` 保证订单、订单明细、库存扣减、购物车删除要么全部成功，要么全部回滚
 - `select_for_update()` 锁定商品行，避免并发请求同时扣减同一库存
-- Redis 锁只用于防止同一用户重复提交，数据库事务和行锁才是库存一致性的最终保障
+- Redis 锁只用于快速拦截同一用户的并发提交；`(user_id, idempotency_key)` 唯一约束负责成功订单身份唯一，事务和商品行锁负责库存一致性
 - 超时任务、支付和人工取消先锁定订单行再重检 `status`，保证同一订单只有一个状态迁移可以恢复库存
 
 超时扫描使用 `(status, expires_at)` 联合索引定位已到期的 `pending` 订单。`expires_at` 存在 MySQL 中，消息只负责触发处理，不能代替订单状态和截止时间这个业务事实。
@@ -184,4 +194,4 @@ key: lock:order:create:user:{user_id}
 ttl: 10 seconds
 ```
 
-释放锁前检查 value，避免误删其他请求创建的锁。
+释放锁前会检查 value，降低误删其他请求锁的风险；当前 GET 和 DELETE 仍不是原子操作。即使 Redis 锁过期或释放异常，数据库幂等唯一约束仍负责阻止同一用户、同一 key 创建第二张成功订单。
