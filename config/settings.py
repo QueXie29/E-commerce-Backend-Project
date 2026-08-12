@@ -146,7 +146,7 @@ CELERY_BROKER_DB = os.getenv("CELERY_BROKER_DB", "1")
 
 CACHES = {
     "default": {
-        "BACKEND": "django.core.cache.backends.redis.RedisCache",
+        "BACKEND": "apps.common.cache.AtomicRedisCache",
         "LOCATION": f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}",
     }
 }
@@ -199,7 +199,7 @@ if "test" in sys.argv:
     }
     CACHES = {
         "default": {
-            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "BACKEND": "apps.common.cache.AtomicLocMemCache",
             "LOCATION": "mini-ecommerce-tests",
         }
     }

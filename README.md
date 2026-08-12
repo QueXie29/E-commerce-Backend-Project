@@ -42,7 +42,7 @@ Mini E-Commerce Backend 是一个基于 Django REST Framework 的轻量级电商
 1. 使用 Django REST Framework 设计 RESTful API，完成用户、商品、购物车、订单核心业务链路。
 2. 订单创建过程使用 `transaction.atomic` 与 `select_for_update` 实现库存扣减一致性，避免并发下单导致超卖。
 3. 使用 Redis 缓存商品详情数据，降低数据库查询压力。
-4. 使用 Redis 用户级短锁拦截短时间重复提交，降低重复创建订单的概率。
+4. 使用 Redis 用户级短锁拦截短时间重复提交，并通过唯一 token 与 Lua compare-and-delete 脚本原子释放锁，避免旧请求误删新请求持有的锁。
 5. 订单提交后发送 Celery ETA 消息，消费者在事务中锁定订单并幂等取消；Celery Beat 定时补偿 MQ 故障期间的漏投订单。
 6. 使用 Docker Compose 编排 Django、MySQL、Redis、Celery Worker、Celery Beat、Nginx，实现项目一键部署。
 
@@ -210,7 +210,7 @@ python manage.py test
 
 ## 面试讲解
 
-这个项目重点讲三个问题：库存一致性、接口防重复提交和订单超时释放库存。创建订单时，服务层在 `transaction.atomic()` 中使用 `select_for_update()` 锁定商品行，检查库存后扣减库存、创建订单和订单明细，任何一步失败都会回滚。为了拦截用户重复点击，创建订单前使用 Redis `cache.add()` 加用户级短期锁。待支付订单在事务提交后发送 Celery ETA 消息；任务到期后再次锁定订单并重检状态，只有仍为 `pending` 且超过 `expires_at` 才取消并恢复库存，Celery Beat 负责漏消息补偿。
+这个项目重点讲三个问题：库存一致性、接口防重复提交和订单超时释放库存。创建订单时，服务层在 `transaction.atomic()` 中使用 `select_for_update()` 锁定商品行，检查库存后扣减库存、创建订单和订单明细，任何一步失败都会回滚。为了拦截用户重复点击，创建订单前使用 Redis `cache.add()` 加用户级短期锁，处理完成后通过 Lua 原子校验 token 并释放锁。待支付订单在事务提交后发送 Celery ETA 消息；任务到期后再次锁定订单并重检状态，只有仍为 `pending` 且超过 `expires_at` 才取消并恢复库存，Celery Beat 负责漏消息补偿。
 
 完整讲解稿和常见面试问题见 [docs/interview.md](docs/interview.md)。
 

@@ -236,12 +236,12 @@ def create_order_from_cart(
         release_order_create_lock(lock_key, lock_value)
 
 
-def release_order_create_lock(lock_key: str, lock_value: str) -> None:
+def release_order_create_lock(lock_key: str, lock_value: str) -> bool:
     try:
-        if cache.get(lock_key) == lock_value:
-            cache.delete(lock_key)
+        return cache.compare_and_delete(lock_key, lock_value)
     except Exception as exc:
         logger.warning("Failed to release order create lock: %s", exc)
+        return False
 
 
 def schedule_order_timeout(order_id: int, expires_at) -> None:
