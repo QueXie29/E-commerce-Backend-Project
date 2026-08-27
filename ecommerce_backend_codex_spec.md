@@ -909,7 +909,7 @@ Idempotency-Key: <1-64 chars unique key>
 Redis 锁建议：
 
 ```text
-key: lock:order:create:user:{user_id}
+key: lock:order:create:user:{user_id}:idempotency:{idempotency_key}
 value: random_uuid
 ttl: 10 seconds
 ```
@@ -940,7 +940,9 @@ def create_order_from_cart(user, idempotency_key, remark):
         ensure_same_request(existing, request_hash)
         return existing
 
-    lock_key = f"lock:order:create:user:{user.id}"
+    lock_key = (
+        f"lock:order:create:user:{user.id}:idempotency:{idempotency_key}"
+    )
     lock_value = str(uuid.uuid4())
 
     if not cache.add(lock_key, lock_value, timeout=10):
@@ -1166,7 +1168,7 @@ TTL：
 缓存 key：
 
 ```text
-lock:order:create:user:{user_id}
+lock:order:create:user:{user_id}:idempotency:{idempotency_key}
 ```
 
 TTL：

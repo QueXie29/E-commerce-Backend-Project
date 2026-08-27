@@ -173,7 +173,7 @@ with transaction.atomic():
 
 - `transaction.atomic()` 保证订单、订单明细、库存扣减、购物车删除要么全部成功，要么全部回滚
 - `select_for_update()` 锁定商品行，避免并发请求同时扣减同一库存
-- Redis 锁只用于快速拦截同一用户的并发提交；`(user_id, idempotency_key)` 唯一约束负责成功订单身份唯一，事务和商品行锁负责库存一致性
+- Redis 锁只用于快速拦截同一用户、同一幂等键的并发提交；`(user_id, idempotency_key)` 唯一约束负责成功订单身份唯一，事务和商品行锁负责库存一致性
 - 超时任务、支付和人工取消先锁定订单行再重检 `status`，保证同一订单只有一个状态迁移可以恢复库存
 
 超时扫描使用 `(status, expires_at)` 联合索引定位已到期的 `pending` 订单。`expires_at` 存在 MySQL 中，消息只负责触发处理，不能代替订单状态和截止时间这个业务事实。
@@ -190,7 +190,7 @@ ttl: 300 seconds
 订单重复提交锁：
 
 ```text
-key: lock:order:create:user:{user_id}
+key: lock:order:create:user:{user_id}:idempotency:{idempotency_key}
 ttl: 10 seconds
 ```
 

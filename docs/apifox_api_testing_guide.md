@@ -1576,10 +1576,10 @@ Idempotency-Key: apifox-user-pending-order-001
 
 1. 调用 `GET /api/auth/me/`，记录普通用户响应中的 `data.id`，例如 `2`。
 2. 先给普通用户购物车添加一个有效商品。
-3. 在 PowerShell 执行，注意把最后的 `2` 换成真实用户 ID：
+3. 在 PowerShell 执行，注意把 key 中的 `2` 换成真实用户 ID：
 
 ```powershell
-docker compose exec redis redis-cli SET lock:order:create:user:2 manual-apifox-lock NX EX 30
+docker compose exec redis redis-cli SET lock:order:create:user:2:idempotency:apifox-lock-check-001 manual-apifox-lock NX EX 30
 ```
 
 预期 Redis 返回：
@@ -1601,7 +1601,7 @@ Idempotency-Key: apifox-lock-check-001
 等待 30 秒让测试锁自动过期，或者手动删除对应 key：
 
 ```powershell
-docker compose exec redis redis-cli DEL lock:order:create:user:2
+docker compose exec redis redis-cli DEL lock:order:create:user:2:idempotency:apifox-lock-check-001
 ```
 
 该步骤只用于本地开发环境，不要在生产 Redis 中手动写锁。

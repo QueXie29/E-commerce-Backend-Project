@@ -547,7 +547,7 @@ GET product:detail:1
 查看订单锁示例：
 
 ```redis
-GET lock:order:create:user:1
+GET lock:order:create:user:1:idempotency:create-order-001
 ```
 
 ## 6. API 操作流程示例
@@ -1140,7 +1140,7 @@ KEYS product:detail:*
 订单锁 key 格式：
 
 ```text
-lock:order:create:user:{user_id}
+lock:order:create:user:{user_id}:idempotency:{idempotency_key}
 ```
 
 由于锁 TTL 只有 10 秒，正常情况下很快消失。可以在接口请求期间或通过测试方式观察。

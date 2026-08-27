@@ -24,8 +24,10 @@ from apps.products.services import invalidate_product_caches
 
 logger = logging.getLogger(__name__)
 
-# 防重复提交锁
-ORDER_CREATE_LOCK_KEY = "lock:order:create:user:{user_id}"
+# 同一用户、同一下单意图的防重复提交锁
+ORDER_CREATE_LOCK_KEY = (
+    "lock:order:create:user:{user_id}:idempotency:{idempotency_key}"
+)
 ORDER_CREATE_LOCK_TTL = 10
 
 ORDER_EXPIRY_CANCELLED = "cancelled"
@@ -99,7 +101,10 @@ def create_order_from_cart(
     if existing_result is not None:
         return existing_result
 
-    lock_key = ORDER_CREATE_LOCK_KEY.format(user_id=user.id)
+    lock_key = ORDER_CREATE_LOCK_KEY.format(
+        user_id=user.id,
+        idempotency_key=idempotency_key,
+    )
     lock_value = uuid.uuid4().hex
 
     if not cache.add(lock_key, lock_value, timeout=ORDER_CREATE_LOCK_TTL):

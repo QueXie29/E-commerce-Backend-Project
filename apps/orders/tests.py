@@ -113,7 +113,10 @@ class OrderApiTests(APITestCase):
             idempotency_key=idempotency_key,
         )
         cache.add(
-            ORDER_CREATE_LOCK_KEY.format(user_id=self.user.id),
+            ORDER_CREATE_LOCK_KEY.format(
+                user_id=self.user.id,
+                idempotency_key=idempotency_key.lower(),
+            ),
             "another-request",
             timeout=10,
         )
@@ -235,15 +238,34 @@ class OrderApiTests(APITestCase):
         self.assertEqual(self.product.stock, 5)
 
     def test_order_create_rejects_duplicate_submission_lock(self):
-        lock_key = ORDER_CREATE_LOCK_KEY.format(user_id=self.user.id)
+        idempotency_key = "locked-order-request"
+        lock_key = ORDER_CREATE_LOCK_KEY.format(
+            user_id=self.user.id,
+            idempotency_key=idempotency_key,
+        )
         cache.add(lock_key, "locked", timeout=10)
         CartItem.objects.create(user=self.user, product=self.product, quantity=1)
 
-        response = self.post_order()
+        response = self.post_order(idempotency_key=idempotency_key)
 
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.data["code"], 40900)
         self.assertTrue(CartItem.objects.filter(user=self.user).exists())
+
+    def test_different_idempotency_key_does_not_share_order_create_lock(self):
+        locked_idempotency_key = "locked-order-request"
+        lock_key = ORDER_CREATE_LOCK_KEY.format(
+            user_id=self.user.id,
+            idempotency_key=locked_idempotency_key,
+        )
+        cache.add(lock_key, "locked", timeout=10)
+        CartItem.objects.create(user=self.user, product=self.product, quantity=1)
+
+        response = self.post_order(idempotency_key="another-order-request")
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["code"], 0)
+        self.assertEqual(Order.objects.count(), 1)
 
     def test_pay_order_and_paid_order_cannot_be_cancelled(self):
         CartItem.objects.create(user=self.user, product=self.product, quantity=1)

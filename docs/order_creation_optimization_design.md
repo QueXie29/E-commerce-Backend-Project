@@ -60,7 +60,7 @@ POST /api/orders/
 
 | 当前机制 | 保护的内容 | 不能解决的问题 |
 |---|---|---|
-| `cache.add(lock:order:create:user:{user_id})` | 短时间内同一用户只有一个创建请求进入主要流程 | TTL 过期、响应丢失后的重试、不同幂等键、持久化结果重放 |
+| `cache.add(lock:order:create:user:{user_id}:idempotency:{idempotency_key})` | 短时间内同一用户、同一幂等键只有一个创建请求进入主要流程 | TTL 过期、响应丢失后的重试、不同幂等键重复消费同一购物车、持久化结果重放 |
 | `transaction.atomic()` | 库存、订单、订单项和购物车清理一起提交或回滚 | 不会自动防止超卖，也不会识别重复业务请求 |
 | 商品 `select_for_update()` | 同一商品的库存检查和修改串行执行 | 不锁购物车，也不代表订单创建严格幂等 |
 | `order_no unique=True` | 每个服务端订单号唯一 | 无法证明两个不同订单是否来自同一次客户端提交 |
@@ -399,7 +399,7 @@ version = 1, 2, 3, ...
 当前 key：
 
 ```text
-lock:order:create:user:{user_id}
+lock:order:create:user:{user_id}:idempotency:{idempotency_key}
 ```
 
 当前释放步骤是：
