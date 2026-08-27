@@ -71,7 +71,7 @@
 }
 ```
 
-### 登录
+### 通用 JWT 登录
 
 `POST /api/auth/login/`
 
@@ -95,7 +95,7 @@
 }
 ```
 
-### 刷新 Token
+### 通用 JWT 刷新 Token
 
 `POST /api/auth/refresh/`
 
@@ -114,6 +114,155 @@ Header：
 ```http
 Authorization: Bearer <access_token>
 ```
+
+上面的 `/api/auth/login/` 和 `/api/auth/refresh/` 会在 JSON 中返回 refresh token，适合命令行、移动端或其他能够安全保管令牌的客户端。Vue 浏览器前端使用下面的 Cookie + CSRF 接口；通用 JWT 接口继续保留，二者不要混用刷新流程。
+
+## 浏览器认证：Cookie + CSRF 契约
+
+浏览器认证采用以下分工：
+
+- access token 由登录或刷新响应返回，前端只保存在 JavaScript 内存中
+- refresh token 由服务端写入 HttpOnly Cookie，前端代码不能读取
+- 调用受保护业务接口时仍使用 `Authorization: Bearer <access_token>`
+- 浏览器登录、刷新和退出都是写操作，必须同时发送 CSRF Cookie 和 `X-CSRFToken` 请求头
+- 浏览器请求需要携带 Cookie；同域部署和 Vite 开发代理均可使用 `credentials: same-origin`
+
+### 1. 初始化 CSRF
+
+`GET /api/auth/browser/csrf/`
+
+该接口设置 `csrftoken` Cookie，并在响应数据中返回一个可用于请求头的 CSRF token：
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "csrfToken": "csrf_token"
+  }
+}
+```
+
+Cookie 中的值与响应数据中的掩码 token 不要求文本相同，Django 都可以校验。当前 Vue 前端从 `csrftoken` Cookie 读取值；后续调用浏览器认证写接口时必须发送：
+
+```http
+Cookie: csrftoken=<csrf_token>
+X-CSRFToken: <csrf_token>
+```
+
+如果缺少或无法通过 CSRF 校验，服务端返回 HTTP `403`。
+
+### 2. 浏览器登录
+
+`POST /api/auth/browser/login/`
+
+请求必须带上上一节的 CSRF Cookie 和请求头，请求体与通用登录相同：
+
+```json
+{
+  "username": "testuser",
+  "password": "Test123456"
+}
+```
+
+响应体只返回 access token，不会把 refresh token 暴露给 JavaScript：
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "access": "jwt_access_token"
+  }
+}
+```
+
+同时，响应通过 `Set-Cookie` 写入 refresh token。默认 Cookie 契约为：
+
+```text
+名称：refresh_token
+HttpOnly：true
+Secure：false（生产 HTTPS 环境应设为 true）
+SameSite：Lax
+Path：/api/auth/browser/
+Max-Age：604800 秒
+```
+
+Cookie 名称、有效期、路径、`Secure` 和 `SameSite` 都可以通过环境变量调整。
+
+### 3. 浏览器刷新
+
+`POST /api/auth/browser/refresh/`
+
+请求体可以为空对象，refresh token 不放在 JSON 中，而是由浏览器自动发送 HttpOnly Cookie：
+
+```http
+Cookie: refresh_token=<jwt_refresh_token>; csrftoken=<csrf_token>
+X-CSRFToken: <csrf_token>
+Content-Type: application/json
+```
+
+```json
+{}
+```
+
+成功响应只包含新的 access token：
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "access": "new_jwt_access_token"
+  }
+}
+```
+
+默认 `JWT_ROTATE_REFRESH_TOKENS=False`，原 refresh Cookie 保持不变。开启轮换后，响应会写入新的 refresh Cookie；如果同时开启黑名单，旧 refresh token 会失效。Cookie 缺失、无效、过期或已进入黑名单时返回 HTTP `401`。
+
+### 4. 浏览器退出
+
+`POST /api/auth/browser/logout/`
+
+请求体可以为空对象，并且同样需要 CSRF Cookie 与 `X-CSRFToken`。服务端会尽可能把 refresh token 加入黑名单，然后通过相同的 Cookie 路径删除它。接口是幂等的：Cookie 已过期、无效或已被注销时，仍会完成删除操作。
+
+```json
+{}
+```
+
+成功响应：
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": null
+}
+```
+
+前端收到响应后还应清除内存中的 access token。退出后再次调用浏览器刷新接口会返回 `401`。
+
+### 5. 浏览器会话恢复顺序
+
+Vue 前端刷新页面后内存 access token 会丢失，恢复会话的顺序为：
+
+1. 确保浏览器已有 `csrftoken`；没有时先调用 CSRF 初始化接口。
+2. 调用浏览器刷新接口，让浏览器自动携带 HttpOnly refresh Cookie。
+3. 将返回的 access token 保存在内存中。
+4. 使用 Bearer access token 调用 `GET /api/auth/me/` 获取当前用户。
+
+业务请求遇到 `401` 时，前端只发起一个并发共享的刷新请求，然后将失败请求重试一次，避免多个请求同时轮换 refresh token。
+
+相关环境变量：
+
+| 环境变量 | 默认值 | 作用 |
+|---|---|---|
+| `JWT_REFRESH_COOKIE_NAME` | `refresh_token` | refresh Cookie 名称 |
+| `JWT_REFRESH_COOKIE_SECURE` | `False` | 是否只允许 HTTPS 传输；生产环境应设为 `True` |
+| `JWT_REFRESH_COOKIE_SAMESITE` | `Lax` | Cookie SameSite 策略 |
+| `JWT_REFRESH_COOKIE_MAX_AGE_SECONDS` | `604800` | Cookie 有效秒数 |
+| `JWT_REFRESH_COOKIE_PATH` | `/api/auth/browser/` | Cookie 发送路径 |
+| `CSRF_TRUSTED_ORIGINS` | 包含本地 `8080` 和 `5173` 地址 | Django 接受的浏览器来源 |
 
 ## 商品和分类
 
@@ -247,9 +396,12 @@ Idempotency-Key: 0d17cd55-4904-4ef2-b4a9-cce6e2066a12
 
 ```json
 {
-  "remark": "请尽快发货"
+  "remark": "请尽快发货",
+  "cart_signature": "12:8:2|15:11:1"
 }
 ```
+
+`cart_signature` 是可选的客户端结算意图签名。Vue 前端会根据当前勾选购物车项的“购物车项 ID、商品 ID、数量”生成稳定签名；同一次网络重试保持不变，勾选项或数量改变时随之改变。它会和备注一起进入服务端请求摘要，避免购物车已经变化时错误重放旧订单。未提供该字段的旧客户端仍保持兼容。
 
 创建订单只购买购物车中 `selected=true` 的商品。服务层会：
 
@@ -265,7 +417,7 @@ Idempotency-Key: 0d17cd55-4904-4ef2-b4a9-cce6e2066a12
 - 写入固定的支付截止时间 `expires_at`
 - 数据库提交后发送 Celery 超时任务
 
-相同用户使用同一 key 和相同请求体重试时，接口返回同一个订单 ID，并增加响应头：
+相同用户使用同一 key、相同备注和相同购物车签名重试时，接口返回同一个订单 ID，并增加响应头：
 
 ```http
 Idempotency-Replayed: true

@@ -2,7 +2,7 @@ x-app-environment: &app-environment
   DEBUG: ${DEBUG:-True}
   SECRET_KEY: ${SECRET_KEY:-dev-secret-key-change-me-32-characters-minimum}
   ALLOWED_HOSTS: ${ALLOWED_HOSTS:-127.0.0.1,localhost,web,nginx}
-  CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:-http://127.0.0.1:8080,http://localhost:8080}
+  CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:-http://127.0.0.1:8080,http://localhost:8080,http://127.0.0.1:5173,http://localhost:5173}
   DB_NAME: ${DB_NAME:-mini_ecommerce}
   DB_USER: ${DB_USER:-mini_ecommerce_user}
   DB_PASSWORD: ${DB_PASSWORD:-mini_ecommerce_password}
@@ -17,6 +17,13 @@ x-app-environment: &app-environment
   ORDER_TIMEOUT_SWEEP_BATCH_SIZE: ${ORDER_TIMEOUT_SWEEP_BATCH_SIZE:-200}
   JWT_ACCESS_TOKEN_LIFETIME_MINUTES: ${JWT_ACCESS_TOKEN_LIFETIME_MINUTES:-60}
   JWT_REFRESH_TOKEN_LIFETIME_DAYS: ${JWT_REFRESH_TOKEN_LIFETIME_DAYS:-7}
+  JWT_ROTATE_REFRESH_TOKENS: ${JWT_ROTATE_REFRESH_TOKENS:-False}
+  JWT_BLACKLIST_AFTER_ROTATION: ${JWT_BLACKLIST_AFTER_ROTATION:-True}
+  JWT_REFRESH_COOKIE_NAME: ${JWT_REFRESH_COOKIE_NAME:-refresh_token}
+  JWT_REFRESH_COOKIE_SECURE: ${JWT_REFRESH_COOKIE_SECURE:-False}
+  JWT_REFRESH_COOKIE_SAMESITE: ${JWT_REFRESH_COOKIE_SAMESITE:-Lax}
+  JWT_REFRESH_COOKIE_MAX_AGE_SECONDS: ${JWT_REFRESH_COOKIE_MAX_AGE_SECONDS:-604800}
+  JWT_REFRESH_COOKIE_PATH: ${JWT_REFRESH_COOKIE_PATH:-/api/auth/browser/}
 
 services:
   mysql:
@@ -122,7 +129,9 @@ services:
       - .:/app
 
   nginx:
-    image: nginx:1.27-alpine
+    build:
+      context: .
+      dockerfile: nginx/Dockerfile
     container_name: mini_ecommerce_nginx
     restart: unless-stopped
     depends_on:
@@ -131,7 +140,6 @@ services:
     ports:
       - "8080:80"
     volumes:
-      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
       - static_volume:/app/staticfiles:ro
 
 volumes:

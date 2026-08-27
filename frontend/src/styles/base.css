@@ -1,0 +1,77 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600&display=swap');
+
+:root {
+  --paper: #f7f3ec;
+  --paper-deep: #eee8de;
+  --surface: #fffdf9;
+  --ink: #1d211e;
+  --muted-strong: #555a55;
+  --muted: #626761;
+  --line: #ded8ce;
+  --accent: #c94b34;
+  --accent-dark: #9d3322;
+  --sage: #657468;
+  --success: #49725a;
+  --warning: #b5742a;
+  --danger: #b23a2c;
+  --shadow-soft: 0 18px 50px rgba(43, 38, 31, .08);
+  --font-sans: 'DM Sans', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --font-display: 'Newsreader', 'Noto Serif SC', 'Songti SC', serif;
+  font-family: var(--font-sans);
+  color: var(--ink);
+  background: var(--paper);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  --el-color-primary: #c94b34;
+  --el-color-primary-light-3: #d87866;
+  --el-color-primary-light-5: #e49c8f;
+  --el-color-primary-light-7: #efc1b8;
+  --el-color-primary-light-9: #faebe8;
+  --el-color-primary-dark-2: #a13c2a;
+  --el-border-radius-base: 8px;
+  --el-font-family: var(--font-sans);
+}
+
+* { box-sizing: border-box; }
+
+:where(a, button, input, select, textarea):focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--accent) 70%, white);
+  outline-offset: 3px;
+}
+html { scroll-behavior: smooth; }
+body { margin: 0; min-width: 320px; min-height: 100vh; background: var(--paper); }
+button, input, textarea, select { font: inherit; }
+button, a { -webkit-tap-highlight-color: transparent; }
+img { display: block; max-width: 100%; }
+a { color: inherit; }
+
+.skip-link { position: fixed; top: -100px; left: 16px; z-index: 1000; padding: 10px 14px; background: var(--ink); color: white; transition: top .15s; }
+.skip-link:focus { top: 12px; }
+.page-shell { width: min(1180px, calc(100% - 32px)); margin-inline: auto; }
+.page-header { margin: 0 0 34px; display: flex; align-items: end; justify-content: space-between; gap: 24px; }
+.page-header h1 { margin: 8px 0 0; font: 500 clamp(38px, 5vw, 62px)/1 var(--font-display); letter-spacing: -.035em; }
+.eyebrow { margin: 0; color: var(--accent-dark); font-size: 11px; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; }
+.surface-card { border: 1px solid var(--line); border-radius: 16px; background: var(--surface); box-shadow: var(--shadow-soft); }
+.primary-link { display: inline-flex; align-items: center; justify-content: center; padding: 11px 18px; border: 1px solid var(--ink); border-radius: 999px; background: var(--ink); color: white; text-decoration: none; font-size: 13px; }
+.secondary-link { display: inline-flex; align-items: center; justify-content: center; padding: 10px 17px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--ink); text-decoration: none; font-size: 13px; }
+.empty-state { padding: 70px 24px; text-align: center; border: 1px dashed var(--line); border-radius: 16px; color: var(--muted); background: color-mix(in srgb, var(--surface) 55%, transparent); }
+.empty-state h2 { margin: 14px 0 8px; color: var(--ink); font: 500 28px var(--font-display); }
+.loading-block { min-height: 280px; display: grid; place-items: center; color: var(--muted); }
+.price-text { font-variant-numeric: tabular-nums; font-weight: 600; }
+.status-pill { display: inline-flex; align-items: center; padding: 5px 9px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+.status-pill.pending { color: #8a561a; background: #fff0d8; }
+.status-pill.paid, .status-pill.active { color: #315d43; background: #e1f1e5; }
+.status-pill.cancelled, .status-pill.inactive { color: #6d6b67; background: #eae8e3; }
+.el-button { font-weight: 600; }
+.el-button--large { min-height: 44px; }
+.el-input__wrapper, .el-textarea__inner, .el-select__wrapper { box-shadow: 0 0 0 1px var(--line) inset !important; background: #fffefa !important; }
+.el-form-item__label { color: var(--muted-strong) !important; font-size: 13px !important; }
+
+@media (max-width: 640px) {
+  .page-shell { width: min(100% - 24px, 1180px); }
+  .page-header { align-items: start; flex-direction: column; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}

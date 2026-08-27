@@ -205,8 +205,15 @@ class ProductViewSet(ApiReadOnlyViewSetResponseMixin, viewsets.ReadOnlyModelView
 
 
 class AdminProductViewSet(ApiModelViewSetResponseMixin, viewsets.ModelViewSet):
-    queryset = Product.objects.select_related("category").all()
     permission_classes = (IsAdminRole,)
+
+    def get_queryset(self):
+        return ProductViewSet.apply_product_filters(
+            self,
+            Product.objects.select_related("category").all(),
+        )
+
+    parse_price = ProductViewSet.parse_price
 
     def get_serializer_class(self):
         if self.action in {"create", "update", "partial_update"}:

@@ -66,6 +66,7 @@ class OrderDetailSerializer(serializers.ModelSerializer):
 
 class OrderCreateSerializer(serializers.Serializer):
     remark = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    cart_signature = serializers.CharField(max_length=2048, required=False, allow_blank=True)
 
     def validate(self, attrs):
         request = self.context.get("request")

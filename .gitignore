@@ -11,3 +11,7 @@ media/
 .coverage
 htmlcov/
 .worktrees/
+frontend/node_modules/
+frontend/dist/
+frontend/.playwright-cli/
+frontend/test-results/

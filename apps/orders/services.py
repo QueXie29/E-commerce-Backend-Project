@@ -49,9 +49,9 @@ def generate_order_no() -> str:
     return f"EC{timestamp}{suffix}"
 
 
-def _make_order_request_hash(remark: str) -> str:
+def _make_order_request_hash(remark: str, cart_signature: str = "") -> str:
     payload = json.dumps(
-        {"remark": remark, "version": 1},
+        {"remark": remark, "cart_signature": cart_signature, "version": 2},
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
@@ -87,9 +87,10 @@ def create_order_from_cart(
     user,
     idempotency_key: str,
     remark: str = "",
+    cart_signature: str = "",
 ) -> OrderCreationResult:
     normalized_remark = remark or ""
-    request_hash = _make_order_request_hash(normalized_remark)
+    request_hash = _make_order_request_hash(normalized_remark, cart_signature or "")
     existing_result = _get_idempotent_order_result(
         user,
         idempotency_key,
@@ -128,7 +129,8 @@ def create_order_from_cart(
             with transaction.atomic():
                 #list() 会立即执行 SQL，并把结果转换成普通 Python 列表
                 cart_items = list(
-                    CartItem.objects.select_related("product", "product__category")
+                    CartItem.objects.select_for_update()
+                    .select_related("product", "product__category")
                     .filter(user=user, selected=True)
                     .order_by("id")
                 )

@@ -159,6 +159,23 @@ class OrderApiTests(APITestCase):
         self.product.refresh_from_db()
         self.assertEqual(self.product.stock, 4)
 
+    def test_same_idempotency_key_with_different_cart_signature_is_rejected(self):
+        CartItem.objects.create(user=self.user, product=self.product, quantity=1)
+        idempotency_key = "changed-cart-request"
+
+        first_response = self.post_order(
+            {"remark": "相同备注", "cart_signature": "1:10:1"},
+            idempotency_key=idempotency_key,
+        )
+        conflict_response = self.post_order(
+            {"remark": "相同备注", "cart_signature": "1:10:1|2:11:1"},
+            idempotency_key=idempotency_key,
+        )
+
+        self.assertEqual(first_response.status_code, 201)
+        self.assertEqual(conflict_response.status_code, 409)
+        self.assertEqual(conflict_response.data["code"], 40901)
+
     def test_database_enforces_user_scoped_idempotency_key(self):
         order_values = {
             "user": self.user,

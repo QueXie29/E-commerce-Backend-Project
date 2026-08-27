@@ -28,7 +28,10 @@ DEBUG = env_bool("DEBUG", True)
 ALLOWED_HOSTS = env_list("ALLOWED_HOSTS", "127.0.0.1,localhost")
 CSRF_TRUSTED_ORIGINS = env_list(
     "CSRF_TRUSTED_ORIGINS",
-    "http://127.0.0.1:8080,http://localhost:8080",
+    (
+        "http://127.0.0.1:8080,http://localhost:8080,"
+        "http://127.0.0.1:5173,http://localhost:5173"
+    ),
 )
 
 
@@ -40,6 +43,7 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "rest_framework",
+    "rest_framework_simplejwt.token_blacklist",
     "corsheaders",
     "apps.accounts",
     "apps.products",
@@ -126,6 +130,7 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 AUTH_USER_MODEL = "accounts.User"
 
 CORS_ALLOW_ALL_ORIGINS = DEBUG
+CORS_ALLOW_CREDENTIALS = True
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
@@ -181,13 +186,36 @@ CELERY_BEAT_SCHEDULE = {
     }
 }
 
+JWT_ACCESS_TOKEN_LIFETIME_MINUTES = int(
+    os.getenv("JWT_ACCESS_TOKEN_LIFETIME_MINUTES", "60")
+)
+JWT_REFRESH_TOKEN_LIFETIME_DAYS = int(
+    os.getenv("JWT_REFRESH_TOKEN_LIFETIME_DAYS", "7")
+)
+
+JWT_REFRESH_COOKIE_NAME = os.getenv("JWT_REFRESH_COOKIE_NAME", "refresh_token")
+JWT_REFRESH_COOKIE_SECURE = env_bool("JWT_REFRESH_COOKIE_SECURE", False)
+JWT_REFRESH_COOKIE_SAMESITE = os.getenv("JWT_REFRESH_COOKIE_SAMESITE", "Lax")
+JWT_REFRESH_COOKIE_MAX_AGE = int(
+    os.getenv(
+        "JWT_REFRESH_COOKIE_MAX_AGE_SECONDS",
+        str(JWT_REFRESH_TOKEN_LIFETIME_DAYS * 24 * 60 * 60),
+    )
+)
+JWT_REFRESH_COOKIE_PATH = os.getenv(
+    "JWT_REFRESH_COOKIE_PATH",
+    "/api/auth/browser/",
+)
+
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(
-        minutes=int(os.getenv("JWT_ACCESS_TOKEN_LIFETIME_MINUTES", "60"))
+        minutes=JWT_ACCESS_TOKEN_LIFETIME_MINUTES
     ),
     "REFRESH_TOKEN_LIFETIME": timedelta(
-        days=int(os.getenv("JWT_REFRESH_TOKEN_LIFETIME_DAYS", "7"))
+        days=JWT_REFRESH_TOKEN_LIFETIME_DAYS
     ),
+    "ROTATE_REFRESH_TOKENS": env_bool("JWT_ROTATE_REFRESH_TOKENS", False),
+    "BLACKLIST_AFTER_ROTATION": env_bool("JWT_BLACKLIST_AFTER_ROTATION", True),
 }
 
 if "test" in sys.argv:

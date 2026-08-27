@@ -9,6 +9,11 @@ User = get_user_model()
 
 # 查看用户信息
 class UserSerializer(serializers.ModelSerializer):
+    role = serializers.SerializerMethodField()
+
+    def get_role(self, obj):
+        return "admin" if obj.is_superuser or obj.role == "admin" else "user"
+
     class Meta:
         model = User
         fields = ("id", "username", "email", "phone", "role", "date_joined")

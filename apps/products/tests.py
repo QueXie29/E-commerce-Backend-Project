@@ -828,6 +828,22 @@ class ProductApiTests(APITestCase):
 
         self.assertIn("Database Only Name", names)
 
+    def test_admin_product_list_applies_keyword_category_and_ordering_filters(self):
+        self.client.force_authenticate(self.admin)
+
+        response = self.client.get(
+            reverse("admin-product-list"),
+            {
+                "keyword": "MacBook",
+                "category": self.category.id,
+                "ordering": "-price",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        names = [item["name"] for item in response.data["data"]["results"]]
+        self.assertEqual(names, ["MacBook Pro 14"])
+
     def test_invalid_product_filter_response_is_not_cached(self):
         with patch("apps.products.views.set_product_list_cache") as cache_set:
             response = self.client.get(

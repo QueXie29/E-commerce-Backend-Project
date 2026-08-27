@@ -1,0 +1,32 @@
+{
+  "name": "mini-ecommerce-frontend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "vue-tsc -b --force",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@lucide/vue": "^1.31.0",
+    "@tanstack/vue-query": "^5.101.4",
+    "element-plus": "^2.14.4",
+    "pinia": "^4.0.3",
+    "vue": "^3.5.41",
+    "vue-router": "4.6.4"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/vue": "^8.1.0",
+    "@types/node": "^26.2.0",
+    "@vitejs/plugin-vue": "^6.0.8",
+    "jsdom": "26.1.0",
+    "typescript": "5.9.3",
+    "vite": "^8.2.1",
+    "vitest": "^4.1.10",
+    "vue-tsc": "^3.3.9"
+  }
+}

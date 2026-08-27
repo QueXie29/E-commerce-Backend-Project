@@ -65,6 +65,7 @@ class OrderViewSet(viewsets.GenericViewSet):
             user=request.user,
             idempotency_key=serializer.validated_data["idempotency_key"],
             remark=serializer.validated_data.get("remark", ""),
+            cart_signature=serializer.validated_data.get("cart_signature", ""),
         )
         response = api_response(
             data=OrderDetailSerializer(result.order).data,
